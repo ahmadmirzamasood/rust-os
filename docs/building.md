@@ -26,7 +26,7 @@ newer. The kernel itself uses no nightly features.
 | `cargo xtask test` | `cargo test` on host-testable crates (`os-abi`, `desktop`, `xtask`) | Verified (Windows) |
 | `cargo xtask build [--release]` | Builds `target/x86_64-unknown-none/<profile>/kernel` (ELF) | Verified (Windows) |
 | `cargo xtask image [--release]` | Builds the kernel, then `tools/image-builder` writes `target/images/<profile>/rust-os-uefi.img` | Verified; the image boots to the kernel hand-off in QEMU (see `run`) |
-| `cargo xtask run --ovmf-code <file> [--ovmf-vars <file>] [--timeout <secs>]` | Builds the image and starts QEMU (`-machine q35 -m 256M -serial stdio -no-reboot`) | Verified (Windows, QEMU 11.1.0): firmware → bootloader → "Jumping to kernel entry point" on serial. The kernel prints nothing yet |
+| `cargo xtask run --ovmf-code <file> [--ovmf-vars <file>] [--timeout <secs>] [--headless]` | Builds the image and starts QEMU (`-machine q35 -m 256M -serial stdio -no-reboot`) | Verified (Windows, QEMU 11.1.0): firmware → bootloader → "Jumping to kernel entry point" on serial. The kernel prints nothing yet |
 | `cargo xtask check-private` | Fails if private paths are tracked or staged, or if `.agent-private/` is not ignored | Verified (Windows) |
 | `cargo xtask ci` | `lint` + `test` + `build` + `check-private` | Verified (Windows) |
 
@@ -48,6 +48,21 @@ QEMU also opens a display window showing the bootloader's framebuffer log.
 
 `RUST_OS_OVMF_CODE` / `RUST_OS_OVMF_VARS` may replace the `--ovmf-*` options.
 The vars file is copied next to the image so the template is never modified.
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every push
+to `master`, every pull request, and on demand:
+
+- **check** (Ubuntu and Windows): `cargo xtask ci`.
+- **image-boot** (Ubuntu): lints `image-builder`, builds the UEFI image,
+  boots it headless in QEMU with the distribution's OVMF for 90 seconds, and
+  fails unless the serial log contains the bootloader's
+  `Jumping to kernel entry point` line. This proves the hand-off only; the
+  kernel has no output of its own yet.
+
+Actions are pinned to commit SHAs; the toolchain comes from
+`rust-toolchain.toml`.
 
 ## Image format
 

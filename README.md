@@ -12,7 +12,7 @@ that jump is observable.
 
 | Area | State |
 | --- | --- |
-| Workspace, toolchain pin, lint/test commands | Working (Windows host verified; Linux/macOS untested) |
+| Workspace, toolchain pin, lint/test commands | Working on Windows; run in CI on Ubuntu and Windows (macOS untested) |
 | Kernel | Compiles for `x86_64-unknown-none`; reached by the bootloader in QEMU; no output of its own |
 | UEFI disk image | Builds; boots through firmware and bootloader in QEMU 11.1.0 |
 | QEMU launch (`cargo xtask run`) | Verified on Windows with QEMU 11.1.0 and its bundled edk2 firmware |

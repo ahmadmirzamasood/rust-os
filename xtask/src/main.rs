@@ -41,6 +41,7 @@ options:
   --ovmf-code <path>        OVMF code firmware for `run` (or RUST_OS_OVMF_CODE)
   --ovmf-vars <path>        OVMF variable store template for `run` (or RUST_OS_OVMF_VARS)
   --timeout <secs>          stop QEMU after this many seconds (default: none)
+  --headless                run QEMU without a display window (CI)
 ";
 
 fn main() -> ExitCode {
@@ -88,6 +89,7 @@ struct Options {
     ovmf_code: Option<PathBuf>,
     ovmf_vars: Option<PathBuf>,
     timeout: Option<Duration>,
+    headless: bool,
 }
 
 impl Options {
@@ -97,6 +99,7 @@ impl Options {
             let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
             match arg.as_str() {
                 "--release" => options.release = true,
+                "--headless" => options.headless = true,
                 "--ovmf-code" => options.ovmf_code = Some(value("--ovmf-code")?.into()),
                 "--ovmf-vars" => options.ovmf_vars = Some(value("--ovmf-vars")?.into()),
                 "--timeout" => {
@@ -238,6 +241,9 @@ fn run(options: &Options) -> Result<(), String> {
     let mut cmd = Command::new("qemu-system-x86_64");
     cmd.args(["-machine", "q35", "-m", "256M", "-serial", "stdio"]);
     cmd.args(["-no-reboot", "-no-shutdown"]);
+    if options.headless {
+        cmd.args(["-display", "none"]);
+    }
     for drive in drives {
         cmd.arg("-drive").arg(drive);
     }
@@ -361,12 +367,13 @@ mod tests {
     #[test]
     fn options_parse_and_reject_unknown() {
         let opts = Options::parse(
-            ["--release", "--timeout", "5"]
+            ["--release", "--headless", "--timeout", "5"]
                 .map(String::from)
                 .into_iter(),
         )
         .expect("valid options");
         assert!(opts.release);
+        assert!(opts.headless);
         assert_eq!(opts.timeout, Some(Duration::from_secs(5)));
         assert!(Options::parse(["--bogus".to_string()].into_iter()).is_err());
         assert!(Options::parse(["--timeout".to_string()].into_iter()).is_err());
