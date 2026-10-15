@@ -24,7 +24,7 @@ no scheduler, file system or desktop yet.
 | QEMU launch (`cargo xtask run`) | Verified on Windows with QEMU 11.1.0 and its bundled edk2 firmware |
 | CPU exceptions (GDT/TSS/IDT, double-fault stack, fault reports) | Verified in QEMU (Windows host): deliberate page fault and stack overflow are reported by `cargo xtask smoke` |
 | Memory management (frames, kernel mappings, guard pages, W^X, heap) | Verified in QEMU (Windows host): on-boot self-test passes in debug and release; see [docs/architecture/memory.md](docs/architecture/memory.md) |
-| Interrupts, timer, PS/2 keyboard and mouse, pointer, input panel | Verified in QEMU (Windows host) by `cargo xtask smoke --scenario input`: injected keys, pointer moves and clicks, queue overflow and recovery, timer vs host time; see [docs/architecture/interrupts-input.md](docs/architecture/interrupts-input.md). USB input is not supported |
+| Interrupts, timer, PS/2 keyboard and mouse, pointer, input panel | Verified in QEMU by `cargo xtask smoke --scenario input` (Windows host; GitHub CI on Ubuntu): injected keys, pointer moves and clicks, queue overflow and recovery, timer vs host time; see [docs/architecture/interrupts-input.md](docs/architecture/interrupts-input.md). USB input is not supported |
 | Desktop, Files, Trash, window manager | Not started (only a host-tested model) |
 | Shutdown / restart | Not started |
 | Sleep | Deliberately unavailable until real suspend/resume exists |

@@ -141,9 +141,10 @@ to `master`, every pull request, and on demand:
 - **check** (Ubuntu and Windows): `cargo xtask ci`.
 - **boot-smoke** (Ubuntu): lints `image-builder`, then runs
   `cargo xtask smoke` (all scenarios) with the distribution's QEMU and OVMF.
-  All five Phase 02 scenarios have passed there. The `interrupt-fault` and
-  `input` scenarios have so far been verified only on the Windows host
-  above.
+  All seven scenarios, including `interrupt-fault` and `input`, have
+  passed there (debug profile). On that runner QEMU delivered the full
+  1000 timer interrupts per second. Release-profile smoke runs have been
+  verified only on the Windows host above.
 
 Actions are pinned to commit SHAs; the toolchain comes from
 `rust-toolchain.toml`.

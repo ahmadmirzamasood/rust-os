@@ -185,9 +185,9 @@ calibrated once against PIT channel 2 by polling. The IDT has stubs for all
 
 **Why:** on one CPU in QEMU `q35`, the 8259 needs no ACPI parsing and no
 MMIO mappings, so it is the smallest working path. Measured on the Windows
-host, QEMU delivered only 85–700 of the 1000 PIT interrupts per second, so
-a tick counter is not a clock. Polled calibration does not depend on
-interrupt delivery.
+host, QEMU delivered only 85–700 of the 1000 PIT interrupts per second (the
+Ubuntu CI runner got all 1000), so a tick counter is not a reliable clock.
+Polled calibration does not depend on interrupt delivery.
 
 **Rejected for now:** I/O APIC + local APIC (needed later for SMP and MSI;
 requires MADT parsing and MMIO); HPET (more setup for no benefit at this

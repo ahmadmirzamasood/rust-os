@@ -3,7 +3,9 @@
 This page describes how the kernel takes external interrupts, keeps time,
 and turns PS/2 keyboard and mouse traffic into on-screen events. Statements
 marked *verified* were checked by `cargo xtask smoke` in QEMU 11.1.0 with
-its bundled edk2 firmware on a Windows host. Nothing else has been tested.
+its bundled edk2 firmware on a Windows host. The same scenarios also pass in
+GitHub CI on Ubuntu with the distribution's QEMU and OVMF. Nothing else has
+been tested.
 
 ## Supported devices and machine
 
@@ -74,10 +76,12 @@ by polling port 0x61, then programs channel 0 (mode 2, divisor 1193 =
 
 Ticks are a wake-up source, not a clock. QEMU drops PIT periods it cannot
 deliver on time. On the Windows test host it delivered between about 85 and
-700 timer interrupts per second, depending on load, instead of 1000.
-Uptime therefore comes from the TSC, which QEMU's TCG derives from the
-host's TSC. *Verified:* over 18–19 s of host time, the guest heartbeat
-advanced at a ratio of 0.98–1.00 to host time, in debug and release. The
+700 timer interrupts per second, depending on load, instead of 1000. On
+GitHub's Ubuntu runner it delivered the full 1000 per second, so the loss
+comes from QEMU on Windows, not from the kernel. Uptime comes from the TSC
+either way; QEMU's TCG derives it from the host's TSC. *Verified:* over
+18–19 s of host time, the guest heartbeat advanced at a ratio of 0.98–1.00
+to host time, in debug and release on Windows and in debug on Ubuntu. The
 design assumes the TSC rate is constant; CPUID's "invariant TSC" bit is
 reported at boot but not required (QEMU's default CPU does not set it).
 
