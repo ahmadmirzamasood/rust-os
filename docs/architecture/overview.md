@@ -12,10 +12,11 @@ processes without being rewritten.
 UEFI firmware (OVMF, external)
   └─ bootloader 0.11 UEFI stage (third-party Rust)
        └─ kernel                                   kernel/
-            ├─ arch: CPU entry, interrupts, paging    (planned)
+            ├─ arch: port I/O, cli/hlt                kernel/src/arch/ (interrupts, paging planned)
+            ├─ boot info: validate, copy memory map   crates/boot-data/ + kernel/src/main.rs
             ├─ memory: frames, mapping, heap          (planned)
-            ├─ drivers: serial, input, block          (planned)
-            ├─ graphics: framebuffer, drawing         (planned)
+            ├─ drivers: 16550 serial (COM1)           kernel/src/serial.rs (input, block planned)
+            ├─ graphics: framebuffer, drawing, text   crates/gfx/ + kernel/src/display.rs
             ├─ vfs + filesystems                      (planned)
             ├─ power: shutdown, restart               (planned)
             └─ trusted user-space modules (linked in for now)
@@ -38,8 +39,10 @@ Rules that keep the later split possible:
 
 | Crate | Kind | Target | Purpose |
 | --- | --- | --- | --- |
-| `kernel` | bin, `no_std`, `no_main` | `x86_64-unknown-none` | Kernel entry (currently idle loop only) |
+| `kernel` | bin, `no_std`, `no_main` | `x86_64-unknown-none` | Entry, serial driver, boot-info checks, framebuffer ownership, panic handler |
 | `os-abi` | lib, `no_std` | any | Kernel ↔ user-space interface (power-action availability today) |
+| `gfx` | lib, `no_std`, no `unsafe` | any | Framebuffer layout validation, clipped drawing, bitmap text, boot screens |
+| `boot-data` | lib, `no_std`, no `unsafe` | any | Memory-map validation and copy; serial boot markers shared with `xtask smoke` |
 | `desktop` | lib, `no_std` | any | Desktop model: Computer/Files/Trash icons, power menu |
 | `xtask` | bin, `std` | host | Build orchestration and repository checks |
 | `image-builder` | bin, `std` | host | Wraps the kernel ELF into a UEFI disk image |

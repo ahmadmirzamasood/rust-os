@@ -78,3 +78,39 @@ comment and every `unsafe fn` a `# Safety` section.
 defaults to "not implemented". The desktop's power menu lists Sleep but keeps
 it disabled unless the kernel reports verified suspend *and* resume. Host-side
 VM pausing never counts.
+
+## ADR-009 — Early diagnostics: polled COM1, one assembly module
+
+**Decision:** the kernel brings up a polled 16550 UART on COM1 before
+anything else and logs every boot stage with a `[rust-os]` prefix. All inline
+assembly in project-owned kernel code lives in `kernel/src/arch/x86_64.rs`:
+`in`/`out` for port I/O, `cli`, and `cli; hlt`. The panic handler reports over
+serial first, then draws a banner only if the framebuffer is free, and never
+allocates or spins on a lock.
+
+**Why:** serial works before (and without) graphics, is captured by every VM,
+and makes black-screen failures diagnosable. Keeping assembly in one small,
+documented file keeps the Rust-only claim auditable.
+
+**Cost:** output-only, polled serial; lines may interleave once interrupts or
+more CPUs exist.
+
+## ADR-010 — Boot smoke test via serial markers and QMP screendump
+
+**Decision:** `cargo xtask smoke` boots images in headless QEMU with the
+serial port in a file and QMP on stdio. Success and failure are explicit
+serial markers defined once in `crates/boot-data` and shared by kernel and
+test. Drawing scenarios are checked with a QMP `screendump` against colours
+defined once in `crates/gfx`. A deliberate panic is tested with a kernel built
+with the `deliberate-panic` feature into a separate target directory and
+image.
+
+**Why:** markers plus a bounded timeout give a clear pass/fail without a
+guest-side exit device, so the tested image is the shipped image (except for
+the panic scenario). Checking real pixels catches stride and channel-order
+bugs that serial output cannot. Rejected for now: QEMU `isa-debug-exit`
+(needs a test-only guest backend in the normal image).
+
+**Cost:** the panic scenario boots a different kernel build than the normal
+one. Screenshots depend on QEMU's display device; other VMs need their own
+evidence.

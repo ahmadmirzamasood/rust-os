@@ -1,6 +1,6 @@
 [package]
 name = "kernel"
-description = "Modular monolithic kernel (x86_64, UEFI via bootloader 0.11). Scaffolding only."
+description = "Modular monolithic kernel (x86_64, UEFI via bootloader 0.11): serial diagnostics, boot-info validation, framebuffer welcome screen."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,9 +12,16 @@ name = "kernel"
 test = false
 bench = false
 
+[features]
+# Panic right after the welcome screen is drawn. Used only by
+# `cargo xtask smoke` to prove the panic path; never enable it otherwise.
+deliberate-panic = []
+
 [dependencies]
 bootloader_api.workspace = true
 os-abi.workspace = true
+gfx.workspace = true
+boot-data.workspace = true
 
 [lints]
 workspace = true

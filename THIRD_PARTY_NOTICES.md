@@ -14,11 +14,12 @@ bootloader stage, which `bootloader` 0.11.17 compiles from the crate
 | Component | License | Notes |
 | --- | --- | --- |
 | `bootloader_api` 0.11.17 (linked into the kernel) | MIT OR Apache-2.0 | |
+| `noto-sans-mono-bitmap` 0.2.0 (linked into the kernel via `crates/gfx`) | MIT (crate, © 2022 Philipp Schuster) | Glyphs rasterized from Noto Sans Mono, which is under the SIL Open Font License 1.1. Kernel uses regular + bold, 16 and 32 px, Basic Latin only. Ship the MIT notice and the OFL text with any released image |
 | `bootloader-x86_64-uefi` / `-common` / `-boot-config` 0.11.17 | MIT OR Apache-2.0 | Contains inline assembly (third-party) |
 | `uefi` 0.38, `uefi-raw` 0.15, `uefi-macros` 0.19, `uguid` 2.2 | MIT OR Apache-2.0 | |
 | `x86_64` 0.15, `x86` 0.52, `raw-cpuid` 10.7 | MIT / Apache-2.0, MIT | |
 | `ucs2` 0.3.3 | **MPL-2.0** | File-level copyleft: when distributing binaries, make the source of this crate (as used) available and keep its notices |
-| `noto-sans-mono-bitmap` 0.2.0 | MIT | Rasterized from Noto Sans Mono; check upstream font license (SIL OFL 1.1) notice requirements before release |
+| `noto-sans-mono-bitmap` 0.2.0 (bootloader's own copy) | MIT | Same crate as above, used by the bootloader's log output |
 | `ryu` 1.0 | Apache-2.0 OR BSL-1.0 | |
 | `unicode-ident` 1.0 | (MIT OR Apache-2.0) AND Unicode-DFS-2016 | Build-time (proc-macro) dependency |
 | `byteorder` 1.4 | Unlicense OR MIT | |

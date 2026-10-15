@@ -31,8 +31,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo xtask ci
 
-  image-boot:
-    name: UEFI image and QEMU boot to kernel hand-off
+  boot-smoke:
+    name: UEFI image and QEMU boot smoke test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,14 +45,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
       - name: Lint image builder
         run: cargo clippy -p image-builder -- -D warnings
-      - name: Build UEFI disk image
-        run: cargo xtask image
-      - name: Boot in QEMU
-        # The kernel prints nothing yet, so this only proves that firmware and
-        # the bootloader load the image and jump to the kernel entry point.
+      - name: Boot smoke test (boot, panic, no-display)
+        # Builds both images, boots each scenario headless and fails unless
+        # the kernel's serial success marker (and screenshot check) appear
+        # within the per-scenario timeout. OVMF is auto-detected.
+        run: cargo xtask smoke
+      - name: Show serial logs
+        if: always()
         run: |
-          code=$(ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -n1)
-          vars=$(ls /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd 2>/dev/null | head -n1)
-          test -n "$code" && test -n "$vars" || { echo "OVMF firmware not found"; ls -l /usr/share/OVMF; exit 1; }
-          cargo xtask run --headless --ovmf-code "$code" --ovmf-vars "$vars" --timeout 90 | tee serial.log
-          grep -q "Jumping to kernel entry point" serial.log
+          for log in target/smoke/debug/*/serial.log; do
+            echo "== $log"; cat "$log" || true
+          done
