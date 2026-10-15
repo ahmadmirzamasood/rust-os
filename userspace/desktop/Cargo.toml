@@ -1,0 +1,14 @@
+[package]
+name = "desktop"
+description = "Desktop shell model (icons, launch targets). no_std; linked into the kernel as trusted code until user mode exists."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+os-abi.workspace = true
+
+[lints]
+workspace = true

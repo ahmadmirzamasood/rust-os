@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = [
+    "kernel",
+    "crates/os-abi",
+    "userspace/desktop",
+    "xtask",
+    "tools/image-builder",
+]
+# Host-testable crates only. The kernel needs `--target x86_64-unknown-none`
+# and the image builder compiles the bootloader, so both are driven by xtask.
+default-members = [
+    "crates/os-abi",
+    "userspace/desktop",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+rust-version = "1.101"
+
+[workspace.dependencies]
+os-abi = { path = "crates/os-abi" }
+bootloader_api = "=0.11.17"
+bootloader = { version = "=0.11.17", default-features = false, features = ["uefi"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+multiple_unsafe_ops_per_block = "warn"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+debug = true
+overflow-checks = true

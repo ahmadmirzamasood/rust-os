@@ -1,0 +1,20 @@
+[package]
+name = "kernel"
+description = "Modular monolithic kernel (x86_64, UEFI via bootloader 0.11). Scaffolding only."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "kernel"
+test = false
+bench = false
+
+[dependencies]
+bootloader_api.workspace = true
+os-abi.workspace = true
+
+[lints]
+workspace = true

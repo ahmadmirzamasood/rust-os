@@ -1,0 +1,14 @@
+[package]
+name = "image-builder"
+description = "Host tool: wraps a kernel ELF into a UEFI GPT disk image using the bootloader crate."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bootloader.workspace = true
+
+[lints]
+workspace = true

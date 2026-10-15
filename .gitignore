@@ -1,0 +1,39 @@
+# Private maintainer material: plans, prompts, queries, agent memory, handoffs.
+/.agent-private/
+# Former locations of the private planning pack (guards against restoring it
+# in place). Public documentation lives in docs/ under different names.
+/GETTING_STARTED_PRIVATE.md
+/docs/prompts/
+/docs/phases/
+/docs/project/
+/docs/subsystems/
+/docs/PROMPTS.md
+/queries/
+/prompts/
+/private/
+/AGENTS.local.md
+/CLAUDE.local.md
+/MEMORY.md
+/QUERY.md
+/QUERIES.md
+/PROMPTS.md
+/.claude/
+/.codex/
+
+# Build output, VM disks and logs
+/target/
+/dist/
+/artifacts/
+*.img
+*.iso
+*.qcow2
+*.vdi
+*.vmdk
+*.log
+
+# Local secrets and configuration
+.env
+.env.*
+
+# Never publish the combined private planning archive
+/rust-os-implementation-pack.zip

@@ -1,0 +1,9 @@
+# Nightly is required by the pinned bootloader 0.11.17: its build script
+# compiles the UEFI stage with `-Zbuild-std`. Compatible with nightlies from
+# 2026-07-06 onward per the upstream changelog. Bump deliberately and record
+# the reason in docs/architecture/decisions.md.
+[toolchain]
+channel = "nightly-2026-10-08"
+components = ["rustfmt", "clippy", "rust-src", "llvm-tools-preview"]
+targets = ["x86_64-unknown-none"]
+profile = "minimal"
