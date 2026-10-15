@@ -72,5 +72,4 @@ are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 ## Contributing and license
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
-Licensed under the [MIT License](LICENSE). The copyright holder line is still
-a placeholder that the maintainer must fill in before distribution.
+Licensed under the [MIT License](LICENSE).
