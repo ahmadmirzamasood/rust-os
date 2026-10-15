@@ -1,6 +1,6 @@
 [package]
 name = "kernel"
-description = "Modular monolithic kernel (x86_64, UEFI via bootloader 0.11): serial diagnostics, exception handling, memory management, 8259/PIT interrupts, PS/2 input, interactive framebuffer screen."
+description = "Modular monolithic kernel (x86_64, UEFI via bootloader 0.11): serial diagnostics, exception handling, memory management, 8259/PIT interrupts, PS/2 input, interactive framebuffer screen, preemptive threads and isolated ring-3 processes."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -31,6 +31,7 @@ gfx.workspace = true
 boot-data.workspace = true
 mm.workspace = true
 input.workspace = true
+exec.workspace = true
 
 [lints]
 workspace = true

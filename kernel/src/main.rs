@@ -17,12 +17,14 @@
 //! 6. Program the 8259 PIC (remapped and fully masked right after step 2),
 //!    the PIT tick and the PS/2 keyboard and mouse, enable interrupts and
 //!    run the input self-test.
-//! 7. Draw the welcome screen and the input-debug panel, print
-//!    `[rust-os] BOOT OK` (or `BOOT DEGRADED`) and enter the event loop:
-//!    pointer, clicks and key events on screen and on serial.
-//!
-//! There is no scheduler: the event loop is the only thread of execution
-//! besides interrupt handlers.
+//! 7. Start the scheduler (this boot context becomes the `ui` thread, plus
+//!    an idle thread), run the scheduler self-test, and validate the boot
+//!    program bundle (the bootloader's ramdisk).
+//! 8. Draw the welcome screen and the input-debug panel, print
+//!    `[rust-os] BOOT OK` (or `BOOT DEGRADED`), start the first user
+//!    process (`init`, the process test driver) and enter the event loop:
+//!    pointer, clicks and key events on screen and on serial, while user
+//!    processes run preemptively alongside it.
 
 #![no_std]
 #![no_main]
@@ -37,8 +39,12 @@ mod input_events;
 mod input_selftest;
 mod memory;
 mod panic;
+mod process;
+mod programs;
+mod sched;
 mod serial;
 mod sync;
+mod syscall;
 mod time;
 mod ui;
 
@@ -68,9 +74,16 @@ static BOOTLOADER_CONFIG: BootloaderConfig = {
     // Map all physical memory at a bootloader-chosen offset (writable,
     // no-execute). Only `memory::phys` uses it, for page tables and frames.
     config.mappings.physical_memory = Some(Mapping::Dynamic);
+    // Put every bootloader-chosen mapping (kernel image, boot stack, boot
+    // information, framebuffer, physical window, ramdisk) in the upper
+    // half, leaving the lower half entirely to user processes.
+    config.mappings.dynamic_range_start = Some(KERNEL_HALF_START);
     config.kernel_stack_size = KERNEL_STACK_SIZE;
     config
 };
+
+/// First address of the upper (kernel) half of the address space.
+const KERNEL_HALF_START: u64 = 0xffff_8000_0000_0000;
 
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
@@ -88,7 +101,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "{}: no_std Rust kernel, x86_64, serial COM1 115200 8N1",
         markers::KERNEL_ENTERED
     );
-    let _ = os_abi::ABI_VERSION;
 
     let mut degraded = false;
 
@@ -110,6 +122,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Remap the 8259 pair away from the exception vectors and mask every
     // line before anything could unmask interrupts.
     pic::init();
+    let simd = arch::x86_64::disable_simd();
+    kprintln!(
+        "[rust-os] x87/SSE/AVX disabled for all code (CR0.EM set; CR4.OSFXSR, OSXSAVE \
+         cleared; firmware had SSE {}, XSAVE {}); UMIP {}",
+        if simd.sse_was_enabled { "on" } else { "off" },
+        if simd.xsave_was_enabled { "on" } else { "off" },
+        if simd.umip { "on" } else { "off" }
+    );
 
     // --- Boot information -------------------------------------------------
     let api_ok = check_api_version(boot_info.api_version);
@@ -187,6 +207,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let input = init_interrupts();
     degraded |= !input.ok();
 
+    // --- Scheduler and programs ------------------------------------------
+    let tasks = init_tasks(
+        boot_info,
+        matches!(mm_status, MemoryStatus::Ready { .. }) && arch::x86_64::interrupts_enabled(),
+    );
+    degraded |= !tasks.ok();
+
     let (screen_w, screen_h) = display_size();
     let pipeline = Pipeline::new(screen_w, screen_h);
     let mut ui = None;
@@ -197,6 +224,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             memory: &memory,
             mm_status: &mm_status,
             input: &input,
+            tasks: &tasks,
             layout,
         };
         let pointer = pipeline.pointer().position();
@@ -236,7 +264,108 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         }
     }
 
-    finish(degraded, input, pipeline, ui)
+    finish(degraded, input, tasks, pipeline, ui)
+}
+
+/// Outcome of scheduler and program-bundle setup.
+#[derive(Debug, Clone, Copy)]
+struct TaskStatus {
+    scheduler: bool,
+    selftest: Option<sched::selftest::Outcome>,
+    programs: Result<usize, programs::ProgramsError>,
+}
+
+impl TaskStatus {
+    fn ok(&self) -> bool {
+        self.scheduler && self.selftest.is_some_and(|s| s.passed()) && self.programs.is_ok()
+    }
+
+    /// Whether user processes can be started.
+    fn processes(&self) -> bool {
+        self.scheduler && self.programs.is_ok()
+    }
+}
+
+/// Start the scheduler, run its self-test and validate the program bundle.
+fn init_tasks(boot_info: &BootInfo, prerequisites: bool) -> TaskStatus {
+    let mut status = TaskStatus {
+        scheduler: false,
+        selftest: None,
+        programs: Err(programs::ProgramsError::NoRamdisk),
+    };
+    if !prerequisites {
+        kprintln!(
+            "{} needs memory management and enabled interrupts",
+            markers::SCHED_FAILED
+        );
+        return status;
+    }
+    match sched::init("ui") {
+        Ok(()) => {
+            status.scheduler = true;
+            kprintln!(
+                "{} preemptive round-robin, {} ms time slice, one CPU; up to {} threads with \
+                 {} KiB kernel stacks; boot context is thread `ui`, plus `idle`",
+                markers::SCHED_READY,
+                sched::SLICE_NS / 1_000_000,
+                sched::MAX_THREADS,
+                sched::STACK_PAGES * 4
+            );
+        }
+        Err(err) => {
+            kprintln!("{} {:?}", markers::SCHED_FAILED, err);
+            return status;
+        }
+    }
+    status.selftest = Some(sched::selftest::run());
+
+    // SAFETY: the bootloader maps the ramdisk at `ramdisk_addr` for
+    // `ramdisk_len` bytes and never unmaps it; the kernel never writes it.
+    let bundle =
+        unsafe { programs::init(boot_info.ramdisk_addr.into_option(), boot_info.ramdisk_len) };
+    match bundle {
+        Ok(bundle) => {
+            let mut valid = 0;
+            for entry in bundle.iter() {
+                match process::loader::check(entry.data) {
+                    Ok(image) => {
+                        valid += 1;
+                        kprintln!(
+                            "[rust-os]   program {}: {} KiB file, {} segments, {} KiB mapped, \
+                             entry {:#x}",
+                            entry.name,
+                            entry.data.len() / 1024,
+                            image.segments().len(),
+                            image.mapped_bytes() / 1024,
+                            image.entry
+                        );
+                    }
+                    Err(err) => kprintln!(
+                        "[rust-os]   program {}: REJECTED: {}",
+                        entry.name,
+                        err.description()
+                    ),
+                }
+            }
+            kprintln!(
+                "{} {} of {} programs in the boot bundle are valid static executables ({} KiB)",
+                markers::PROGRAMS_READY,
+                valid,
+                bundle.len(),
+                boot_info.ramdisk_len / 1024
+            );
+            status.programs = Ok(valid);
+        }
+        Err(err) => {
+            kprintln!(
+                "{} {:?}; user processes cannot be started",
+                markers::PROGRAMS_UNAVAILABLE,
+                err
+            );
+            status.programs = Err(err);
+        }
+    }
+    status
 }
 
 /// Outcome of interrupt, timer and input setup.
@@ -332,9 +461,9 @@ fn init_interrupts() -> InputStatus {
     }
 }
 
-/// Report the boot outcome and run the event loop (or halt if interrupts
-/// could not be enabled).
-fn report_and_run(degraded: bool, pipeline: Pipeline, ui: Option<Ui>) -> ! {
+/// Report the boot outcome, start `init` and run the event loop (or halt
+/// if interrupts could not be enabled).
+fn report_and_run(degraded: bool, tasks: TaskStatus, pipeline: Pipeline, ui: Option<Ui>) -> ! {
     if degraded {
         kprintln!(
             "{}: kernel initialized with failures listed above",
@@ -352,6 +481,17 @@ fn report_and_run(degraded: bool, pipeline: Pipeline, ui: Option<Ui>) -> ! {
     }
     #[cfg(feature = "deliberate-interrupt-fault")]
     arm_interrupt_fault();
+    if tasks.processes() {
+        if let Err(err) = process::start_init(INIT_PROGRAM) {
+            process::report_start_failure(INIT_PROGRAM, err);
+        }
+    } else {
+        kprintln!(
+            "{}: no scheduler or program bundle; {} not started",
+            markers::PROCESS_TESTS_FAIL,
+            INIT_PROGRAM
+        );
+    }
     kprintln!("[rust-os] entering event loop");
     event_loop::run(pipeline, ui)
 }
@@ -386,16 +526,31 @@ fn display_size() -> (u32, u32) {
     feature = "deliberate-page-fault",
     feature = "deliberate-stack-overflow"
 )))]
-fn finish(degraded: bool, _input: InputStatus, pipeline: Pipeline, ui: Option<Ui>) -> ! {
-    report_and_run(degraded, pipeline, ui)
+fn finish(
+    degraded: bool,
+    _input: InputStatus,
+    tasks: TaskStatus,
+    pipeline: Pipeline,
+    ui: Option<Ui>,
+) -> ! {
+    report_and_run(degraded, tasks, pipeline, ui)
 }
+
+/// The first user process.
+const INIT_PROGRAM: &str = "init";
 
 /// Smoke-test build: exercise the panic path once the welcome screen is up.
 #[cfg(feature = "deliberate-panic")]
-fn finish(_degraded: bool, _input: InputStatus, _pipeline: Pipeline, _ui: Option<Ui>) -> ! {
+fn finish(
+    _degraded: bool,
+    _input: InputStatus,
+    _tasks: TaskStatus,
+    _pipeline: Pipeline,
+    _ui: Option<Ui>,
+) -> ! {
     // Early-failure build: the event loop is never reached, but stays
     // compiled (and linted) like in the normal build.
-    let _ = report_and_run as fn(bool, Pipeline, Option<Ui>) -> !;
+    let _ = report_and_run as fn(bool, TaskStatus, Pipeline, Option<Ui>) -> !;
     panic!("{}", markers::DELIBERATE_PANIC_MESSAGE)
 }
 
@@ -403,10 +558,16 @@ fn finish(_degraded: bool, _input: InputStatus, _pipeline: Pipeline, _ui: Option
 /// double-fault stack. Expected: a page-fault report naming that guard page,
 /// then the panic banner.
 #[cfg(feature = "deliberate-page-fault")]
-fn finish(_degraded: bool, _input: InputStatus, _pipeline: Pipeline, _ui: Option<Ui>) -> ! {
+fn finish(
+    _degraded: bool,
+    _input: InputStatus,
+    _tasks: TaskStatus,
+    _pipeline: Pipeline,
+    _ui: Option<Ui>,
+) -> ! {
     // Early-failure build: the event loop is never reached, but stays
     // compiled (and linted) like in the normal build.
-    let _ = report_and_run as fn(bool, Pipeline, Option<Ui>) -> !;
+    let _ = report_and_run as fn(bool, TaskStatus, Pipeline, Option<Ui>) -> !;
     let guard = memory::find_guard(markers::DOUBLE_FAULT_STACK_GUARD)
         .expect("double-fault stack guard registered");
     kprintln!("{} write to {:#x}", markers::DELIBERATE_FAULT, guard + 0x10);
@@ -422,10 +583,16 @@ fn finish(_degraded: bool, _input: InputStatus, _pipeline: Pipeline, _ui: Option
 /// Expected: a double fault (handled on the IST stack) whose report names the
 /// boot stack's guard page, then the panic banner.
 #[cfg(feature = "deliberate-stack-overflow")]
-fn finish(_degraded: bool, _input: InputStatus, _pipeline: Pipeline, _ui: Option<Ui>) -> ! {
+fn finish(
+    _degraded: bool,
+    _input: InputStatus,
+    _tasks: TaskStatus,
+    _pipeline: Pipeline,
+    _ui: Option<Ui>,
+) -> ! {
     // Early-failure build: the event loop is never reached, but stays
     // compiled (and linted) like in the normal build.
-    let _ = report_and_run as fn(bool, Pipeline, Option<Ui>) -> !;
+    let _ = report_and_run as fn(bool, TaskStatus, Pipeline, Option<Ui>) -> !;
     #[allow(unconditional_recursion)]
     fn recurse(depth: u64) -> u64 {
         let frame = core::hint::black_box([depth; 64]);
@@ -578,6 +745,7 @@ struct WelcomeInfo<'a> {
     memory: &'a Result<MemorySummary, MemoryMapError>,
     mm_status: &'a MemoryStatus,
     input: &'a InputStatus,
+    tasks: &'a TaskStatus,
     layout: &'a Layout,
 }
 
@@ -588,6 +756,7 @@ fn draw_welcome(info: &WelcomeInfo<'_>, canvas: &mut gfx::Canvas<'_>) {
         memory,
         mm_status,
         input,
+        tasks,
         layout,
     } = *info;
     let state = |ok: bool| {
@@ -677,12 +846,32 @@ fn draw_welcome(info: &WelcomeInfo<'_>, canvas: &mut gfx::Canvas<'_>) {
         (false, true) => "PS/2 mouse only; keyboard unavailable",
         (false, false) => "no PS/2 input devices",
     };
-    let all_ok = serial_ok && api_ok && memory.is_ok() && memory_ok && input.ok();
+    let mut tasks_line = FmtBuf::<64>::new();
+    let _ = if tasks.scheduler {
+        write!(
+            tasks_line,
+            "preemptive {} ms slices, self-test {}; {}",
+            sched::SLICE_NS / 1_000_000,
+            if tasks.selftest.is_some_and(|s| s.passed()) {
+                "passed"
+            } else {
+                "FAILED"
+            },
+            if tasks.programs.is_ok() {
+                "programs ready"
+            } else {
+                "NO programs"
+            }
+        )
+    } else {
+        write!(tasks_line, "scheduler NOT running")
+    };
+    let all_ok = serial_ok && api_ok && memory.is_ok() && memory_ok && input.ok() && tasks.ok();
 
     let lines = [
         StatusLine {
             label: "Kernel",
-            value: "no_std Rust, x86_64, ring 0",
+            value: "no_std Rust, x86_64; user processes in ring 3",
             state: StageState::Ok,
         },
         StatusLine {
@@ -720,6 +909,11 @@ fn draw_welcome(info: &WelcomeInfo<'_>, canvas: &mut gfx::Canvas<'_>) {
             state: state(input_devices_ok),
         },
         StatusLine {
+            label: "Tasks",
+            value: tasks_line.as_str(),
+            state: state(tasks.ok()),
+        },
+        StatusLine {
             label: "Status",
             value: if all_ok {
                 "Kernel initialized"
@@ -733,7 +927,7 @@ fn draw_welcome(info: &WelcomeInfo<'_>, canvas: &mut gfx::Canvas<'_>) {
         title: "rust-os",
         subtitle: "An experimental operating system written in Rust",
         lines: &lines,
-        footer: "No files or desktop yet. Diagnostics on COM1.",
+        footer: "No files or desktop yet. Diagnostics and process tests on COM1.",
         reserve_bottom: gfx::screens::input_panel_reserve(ui::PANEL_LINES),
     };
     gfx::screens::draw_welcome(canvas, &welcome);

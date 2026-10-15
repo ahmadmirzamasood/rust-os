@@ -10,6 +10,12 @@
 //! and returns with `iretq`. The dispatcher may edit the frame (the probe
 //! fixups in [`super::probe`] change RIP/RAX/RSP) before it is restored.
 //!
+//! Flags: the common path loads RFLAGS with 0 before calling Rust. Interrupt
+//! gates clear only IF, TF and NT; this also clears DF (the ABI requires it)
+//! and AC, which ring 3 may set to suspend SMAP for the kernel while it
+//! handles that process's interrupts and system calls. The interrupted
+//! RFLAGS is in the frame and restored by `iretq`.
+//!
 //! Stack alignment: in 64-bit mode the CPU aligns RSP to 16 bytes before
 //! pushing its 5-word frame; the stub adds error code + vector (2 words) and
 //! 15 registers, 22 words in total, so RSP is 16-byte aligned again at the
@@ -20,17 +26,21 @@
 //! with `.irp` into one block at a fixed 16-byte stride, so the IDT can be
 //! built from the block's address ([`interrupt_entry_points`]). They push a
 //! zero error code and the vector and share the same common path; the
-//! dispatcher hands them to [`super::interrupts::handle`] and returns. The
+//! dispatcher hands them to [`super::interrupts::handle`] (or, for vector
+//! 0x80, to the system-call dispatcher) and returns. The
 //! kernel target is soft-float (no SSE/x87 state is touched by Rust code), so
 //! the fifteen general-purpose registers are the whole interrupted state.
 //!
 //! # Policy
 //!
+//! - An exception raised in ring 3 (the saved CS has RPL 3) is the user
+//!   process's fault: it is reported and the process is terminated; the
+//!   kernel and every other process continue.
 //! - A page fault or #GP raised by a probe instruction is recovered: the
 //!   probe returns an error and the kernel continues (used by self-tests).
-//! - Every other exception is fatal: a report goes to the serial port (no
-//!   allocation, no lock waits), then the kernel panics, which draws the
-//!   on-screen banner and halts.
+//! - Every other exception (one raised by kernel code) is fatal: a report
+//!   goes to the serial port (no allocation, no lock waits), then the kernel
+//!   panics, which draws the on-screen banner and halts.
 //! - The double fault runs on its own IST stack, so a kernel stack overflow
 //!   (which faults again while delivering the page fault) is still reported.
 
@@ -170,8 +180,9 @@ rust_os_exc_common:
     push r13
     push r14
     push r15
+    push 0
+    popfq
     mov rdi, rsp
-    cld
     call {dispatch}
     pop r15
     pop r14
@@ -380,17 +391,36 @@ impl fmt::Display for PageFaultCode {
 
 /// Called by the entry stubs with interrupts disabled (interrupt gates).
 ///
-/// Must not allocate or wait on locks: it can interrupt any code, including
-/// the allocator. External interrupts (vectors 32 and up) and the probe
-/// fixups return; every other exception ends in a panic.
+/// - The system-call vector goes to [`crate::syscall::dispatch`].
+/// - External interrupts (other vectors from 32 up) go to
+///   [`super::interrupts::handle`].
+/// - Both may then switch threads ([`crate::sched::preempt_point`]): the
+///   frame stays on this thread's kernel stack until it resumes.
+/// - An exception raised in ring 3 terminates only the current process
+///   ([`crate::process::user_fault`]).
+/// - A page fault or #GP from a probe instruction is recovered.
+/// - Every other exception is a kernel bug and ends in a panic.
+///
+/// The interrupt and fatal paths must not allocate or wait on locks: they
+/// can interrupt any kernel code, including the allocator.
 #[unsafe(no_mangle)]
 extern "C" fn rust_os_exception_dispatch(frame: &mut ExceptionFrame) {
     let vector = frame.vector as usize;
+    if vector == usize::from(os_abi::syscall::VECTOR) {
+        crate::syscall::dispatch(frame);
+        crate::sched::preempt_point();
+        return;
+    }
     if vector >= super::tables::EXCEPTION_VECTORS {
         super::interrupts::handle(frame.vector);
+        crate::sched::preempt_point();
         return;
     }
     let cr2 = read_cr2();
+    if frame.cs & 3 == 3 {
+        // Ring 3 caused it: only that process ends; the kernel continues.
+        crate::process::user_fault(frame, cr2)
+    }
     if (vector == PAGE_FAULT || vector == GENERAL_PROTECTION) && probe::try_recover(frame, cr2) {
         return;
     }

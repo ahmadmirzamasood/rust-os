@@ -3,6 +3,7 @@
 mod picture;
 mod qemu;
 mod smoke;
+mod user;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -42,14 +43,17 @@ const HELP: &str = "\
 usage: cargo xtask <command> [options]
 
 commands:
-  lint            rustfmt --check, clippy (host crates and kernel target), deny warnings
+  lint            rustfmt --check, clippy (host crates, kernel and user programs on
+                  the bare-metal target), deny warnings
   test            host unit tests for the default workspace members
   build           build the kernel ELF for x86_64-unknown-none
-  image           build the kernel and a UEFI GPT disk image (network on first run)
+  user            build the user programs, validate them, write the program bundle
+  image           build kernel, user programs and a UEFI GPT disk image whose
+                  ramdisk is the program bundle (network on first run)
   run             build the image and boot it in QEMU (window + serial on stdio)
   smoke           boot smoke test in headless QEMU: serial markers + screenshot check
   check-private   fail if private paths are tracked or staged in Git
-  ci              lint + test + build + check-private (no QEMU needed)
+  ci              lint + test + build + user + check-private (no QEMU needed)
   help            show this message
 
 options:
@@ -60,8 +64,8 @@ options:
                             smoke: per-scenario limit (default: 120)
   --headless                run: no display window
   --scenario <name>         smoke: boot, panic, no-display, page-fault,
-                            stack-overflow, interrupt-fault, input or all
-                            (default: all)
+                            stack-overflow, interrupt-fault, input, processes
+                            or all (default: all)
 
 QEMU is `qemu-system-x86_64` from PATH, or RUST_OS_QEMU.
 ";
@@ -83,6 +87,7 @@ fn main() -> ExitCode {
         "lint" => lint(),
         "test" => test(),
         "build" => build_kernel(&options, KernelVariant::Normal).map(drop),
+        "user" => user::build_bundle(&options).map(drop),
         "image" => build_image(&options, KernelVariant::Normal).map(drop),
         "run" => run(&options),
         "smoke" => smoke(&options),
@@ -90,6 +95,7 @@ fn main() -> ExitCode {
         "ci" => lint()
             .and_then(|()| test())
             .and_then(|()| build_kernel(&options, KernelVariant::Normal).map(drop))
+            .and_then(|()| user::build_bundle(&options).map(drop))
             .and_then(|()| check_private()),
         "help" | "--help" | "-h" => {
             print!("{HELP}");
@@ -240,7 +246,7 @@ fn lint() -> Result<(), String> {
         kernel.args(["--", "-D", "warnings"]);
         status(kernel)?;
     }
-    Ok(())
+    user::lint()
 }
 
 fn test() -> Result<(), String> {
@@ -275,6 +281,7 @@ fn build_kernel(options: &Options, variant: KernelVariant) -> Result<PathBuf, St
 
 fn build_image(options: &Options, variant: KernelVariant) -> Result<PathBuf, String> {
     let kernel = build_kernel(options, variant)?;
+    let bundle = user::build_bundle(options)?;
     let image = workspace_root()
         .join("target")
         .join("images")
@@ -282,7 +289,7 @@ fn build_image(options: &Options, variant: KernelVariant) -> Result<PathBuf, Str
         .join(variant.image_name());
     let mut cmd = cargo();
     cmd.args(["run", "--release", "--package", "image-builder", "--"]);
-    cmd.arg(&kernel).arg(&image);
+    cmd.arg(&kernel).arg(&image).arg(&bundle);
     status(cmd)?;
     Ok(image)
 }

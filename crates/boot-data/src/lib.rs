@@ -98,4 +98,36 @@ pub mod markers {
     /// After a stall, everything queued during it has been decoded and the
     /// rings are empty again; input sent from now on is not dropped.
     pub const STALL_DRAINED: &str = "[rust-os] input: overflow test: backlog drained;";
+
+    /// Diagnosis text for the guard page below a thread's kernel stack.
+    pub const THREAD_STACK_GUARD: &str = "guard page below a thread's kernel stack";
+    /// The scheduler runs: followed by its policy.
+    pub const SCHED_READY: &str = "[rust-os] scheduler ready:";
+    /// The scheduler could not start; followed by the reason.
+    pub const SCHED_FAILED: &str = "[rust-os] scheduler FAILED:";
+    /// Every scheduler self-test check passed.
+    pub const SCHED_SELFTEST_PASS: &str = "[rust-os] SCHED SELF-TEST PASS";
+    /// At least one scheduler self-test check failed.
+    pub const SCHED_SELFTEST_FAIL: &str = "[rust-os] SCHED SELF-TEST FAIL";
+    /// Prefix of one failed scheduler self-test check.
+    pub const SCHED_SELFTEST_CHECK_FAILED: &str = "[rust-os]   scheduler self-test check failed:";
+    /// The boot program bundle was found and validated; followed by the
+    /// program names.
+    pub const PROGRAMS_READY: &str = "[rust-os] programs:";
+    /// No usable program bundle; followed by the reason.
+    pub const PROGRAMS_UNAVAILABLE: &str = "[rust-os] programs unavailable:";
+    /// A process started: ` <name> (pid <n>) ...`.
+    pub const PROCESS_STARTED: &str = "[rust-os] process started:";
+    /// A process ended: ` <name> (pid <n>): exit code <c> | fault vector <v> ...`.
+    pub const PROCESS_EXITED: &str = "[rust-os] process exited:";
+    /// A process was terminated after a CPU exception in ring 3; followed by
+    /// the process, the exception and the cause. Never fatal for the kernel.
+    pub const USER_FAULT: &str = "[rust-os] USER FAULT:";
+    /// Prefix of text a process wrote with `DEBUG_WRITE`
+    /// (`[user <name>/<pid>] <text>`). User text never starts a line.
+    pub const USER_OUTPUT: &str = "[user ";
+    /// `init` (the process test driver) exited with code 0.
+    pub const PROCESS_TESTS_PASS: &str = "[rust-os] PROCESS TESTS PASS";
+    /// `init` exited with a non-zero code or faulted, or could not start.
+    pub const PROCESS_TESTS_FAIL: &str = "[rust-os] PROCESS TESTS FAIL";
 }

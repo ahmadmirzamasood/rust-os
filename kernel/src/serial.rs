@@ -2,10 +2,10 @@
 //!
 //! Output only. Every wait is bounded, so a missing or stuck UART drops
 //! bytes instead of hanging the kernel. The kernel runs on one CPU and
-//! interrupt handlers never print, so only the main loop writes, except a
-//! fatal exception report, whose lines could interleave with a line the
-//! main loop was printing. Nothing here holds state across bytes, so that
-//! never corrupts memory.
+//! interrupt handlers never print. Threads print whole lines with
+//! preemption disabled ([`print_line`]), so their lines never interleave;
+//! only a fatal exception report could interleave with a line in progress.
+//! Nothing here holds state across bytes, so that never corrupts memory.
 
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +32,8 @@ static READY: AtomicBool = AtomicBool::new(false);
 
 fn write_reg(offset: u16, value: u8) {
     // SAFETY: COM1 (0x3F8..=0x3FF) is owned by this driver; no other kernel
-    // code touches these ports, and only one CPU runs with interrupts masked.
+    // code touches these ports, and there is one CPU. Ring 3 cannot reach
+    // them (IOPL 0, no I/O bitmap).
     unsafe { outb(COM1 + offset, value) }
 }
 
@@ -103,12 +104,20 @@ pub fn print(args: fmt::Arguments<'_>) {
     let _ = Serial.write_fmt(args);
 }
 
+/// Print `args` and a newline as one unit: preemption is disabled while the
+/// line is written, so lines from different threads never interleave.
+#[doc(hidden)]
+pub fn print_line(args: fmt::Arguments<'_>) {
+    let _whole_line = crate::sync::PreemptGuard::new();
+    print(args);
+    print(format_args!("\n"));
+}
+
 /// Print a line to the serial console.
 #[macro_export]
 macro_rules! kprintln {
     () => { $crate::serial::print(format_args!("\n")) };
     ($($arg:tt)*) => {{
-        $crate::serial::print(format_args!($($arg)*));
-        $crate::serial::print(format_args!("\n"));
+        $crate::serial::print_line(format_args!($($arg)*));
     }};
 }

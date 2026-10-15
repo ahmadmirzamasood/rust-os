@@ -3,10 +3,12 @@
 ## Shape
 
 A **modular monolithic kernel** for x86_64. Subsystems are separate Rust
-modules and crates with one-way dependencies, all running in ring 0 in one
-address space at first. The desktop and applications are written against a
-narrow shared interface (`os-abi`) so they can later move into isolated user
-processes without being rewritten.
+modules and crates with one-way dependencies running in ring 0. User
+programs run as isolated processes in ring 3, each in its own address
+space, and talk to the kernel only through the versioned system-call
+interface in `os-abi` (see [processes.md](processes.md)). The desktop model
+is still linked into the kernel; it is written against `os-abi` so it can
+move into a process later.
 
 ```text
 UEFI firmware (OVMF, external)
@@ -21,12 +23,17 @@ UEFI firmware (OVMF, external)
             ├─ time: tick counter, TSC clock          kernel/src/time.rs
             ├─ input: rings, decoders, pointer        crates/input/ + kernel/src/input_events.rs
             ├─ event loop + input-debug screen        kernel/src/event_loop.rs, kernel/src/ui.rs
+            │  (the `ui` thread)
             ├─ graphics: framebuffer, drawing, text   crates/gfx/ + kernel/src/display.rs
+            ├─ threads: scheduler, context switch     kernel/src/sched/, arch/x86_64/switch.rs
+            ├─ processes: address spaces, loader,     kernel/src/process/, memory/user.rs,
+            │  handles, channels, system calls          syscall.rs, programs.rs, crates/exec/
             ├─ vfs + filesystems                      (planned)
             ├─ power: shutdown, restart               (planned)
-            └─ trusted user-space modules (linked in for now)
-                 └─ desktop shell, Files, ...         userspace/
-                      ↕ os-abi interface               crates/os-abi/
+            └─ trusted modules (linked in for now)
+                 └─ desktop model                     userspace/desktop/
+  ── ring 3 ── int 0x80 ── os-abi interface ───────── crates/os-abi/
+       user processes (static ELF, boot bundle)    userspace/apps/ on userspace/ulib/
 ```
 
 Rules that keep the later split possible:
@@ -38,16 +45,22 @@ Rules that keep the later split possible:
   can cross a system-call boundary.
 - Shared logic is `no_std` and host-testable; hardware access stays in narrow,
   documented `unsafe` wrappers inside the kernel.
-- Interrupt handlers only capture bounded data into lock-free rings and
-  never lock, allocate or print; decoding happens in the main loop. CPU
-  exception handlers never allocate or wait on locks.
+- Interrupt handlers only capture bounded data into lock-free rings (and
+  wake threads through the scheduler's interrupt-safe cell) and never lock,
+  allocate or print; decoding happens in the `ui` thread. CPU exception
+  handlers never allocate or wait on locks.
+- No thread is ever preempted while it holds a lock; blocking with one held
+  is a checked bug. See [processes.md](processes.md#locking-rules).
 
 ## Workspace
 
 | Crate | Kind | Target | Purpose |
 | --- | --- | --- | --- |
-| `kernel` | bin, `no_std`, `no_main` | `x86_64-unknown-none` | Entry, CPU tables and exception reports, memory management and its self-test, 8259/PIT/IRQ dispatch, TSC clock, PS/2 driver, event loop and input screen, serial driver, boot-info checks, framebuffer ownership, panic handler |
-| `os-abi` | lib, `no_std` | any | Kernel ↔ user-space interface (power-action availability today) |
+| `kernel` | bin, `no_std`, `no_main` | `x86_64-unknown-none` | Entry, CPU tables and exception reports, memory management and its self-test, 8259/PIT/IRQ dispatch, TSC clock, PS/2 driver, event loop and input screen, serial driver, boot-info checks, framebuffer ownership, panic handler, scheduler and its self-test, process address spaces, ELF loader, handles, channels, system calls |
+| `os-abi` | lib, `no_std`, no `unsafe` | any | Kernel ↔ user-space interface: system-call numbers, errors and their encoding, exit status, user address layout and limits, power-action availability |
+| `exec` | lib, `no_std`, no `unsafe` | any | Validating static ELF64 parser and the program-bundle format; used by the kernel loader and by xtask |
+| `ulib` | lib, `no_std` | `x86_64-unknown-none` | User-space support: entry point, panic handler, system-call wrappers (`int 0x80`), handles, channels, processes, `println!` |
+| `apps` | bins, `no_std`, `no_main` | `x86_64-unknown-none` | User programs in the boot bundle: `init` (process test driver), `echo`, `spin`, `fault`, `abuse` |
 | `gfx` | lib, `no_std`, no `unsafe` | any | Framebuffer layout validation, clipped drawing and blitting, bitmap text, boot screens, input panel, pointer, push button |
 | `input` | lib, `no_std`, no `unsafe` | any | Interrupt-safe byte rings, scancode set 1 and PS/2 mouse decoders, pointer state, bounded event queue; see [interrupts-input.md](interrupts-input.md) |
 | `boot-data` | lib, `no_std`, no `unsafe` | any | Memory-map validation and copy; serial boot markers shared with `xtask smoke` |
@@ -57,16 +70,19 @@ Rules that keep the later split possible:
 | `image-builder` | bin, `std` | host | Wraps the kernel ELF into a UEFI disk image |
 
 `default-members` lists only host-testable crates so `cargo test` and
-`cargo clippy` work without a target flag; xtask builds the kernel with
-`--target x86_64-unknown-none`.
+`cargo clippy` work without a target flag; xtask builds the kernel and the
+user programs with `--target x86_64-unknown-none`.
 
 ## Isolation path
 
-1. Now: everything trusted, one address space. **No security isolation.**
-2. Later: per-process page tables, ring 3, a system-call entry, and
-   handle-based access; `os-abi` becomes the system-call interface; desktop
-   and Files move out of the kernel.
-3. Only after that may untrusted programs run.
+1. Done: per-process page tables, ring 3, a system-call gate, validated
+   arguments and user pointers, handle-based access, fault containment
+   (see [processes.md](processes.md)). Programs come only from the boot
+   bundle built with the OS.
+2. Next: move the desktop and Files out of the kernel into processes; add
+   the calls they need (drawing surfaces, input events, files).
+3. Only after more hardening (resource limits, a security review, more
+   adversarial testing) may untrusted programs run.
 
 ## Out of scope for the first release
 

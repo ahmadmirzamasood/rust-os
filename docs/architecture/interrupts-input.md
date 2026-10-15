@@ -12,7 +12,7 @@ been tested.
 | Item | Supported | Notes |
 | --- | --- | --- |
 | Interrupt controller | Legacy 8259A pair (master + slave) | Remapped to vectors 32–47. Local APIC left in the firmware's virtual-wire mode; I/O APIC unused |
-| Timer | 8254 PIT channel 0, IRQ 0, requested 1000 Hz | Wakes the event loop and counts timer interrupts |
+| Timer | 8254 PIT channel 0, IRQ 0, requested 1000 Hz | Wakes the event loop, drives preemption and sleeps (see [processes.md](processes.md)), counts timer interrupts |
 | Clock | TSC, calibrated against PIT channel 2 | Monotonic uptime; falls back to the tick count if calibration fails |
 | Keyboard | PS/2 keyboard on i8042 port 1 | Scancode set 2 with controller translation, so set 1 is decoded; US layout |
 | Mouse | PS/2 mouse on i8042 port 2 | Standard 3-byte packets: movement and left/middle/right buttons. No wheel |
@@ -55,15 +55,18 @@ These hold for every interrupt handler (also documented in
    into a byte ring or bump a counter, send the EOI. Decoding, drawing and
    logging happen in the main loop.
 3. Handlers never take a lock (not even a `TryLock`), never allocate and
-   never print. They share state with normal code only through atomics:
-   single-producer/single-consumer rings and counters.
+   never print. They share state with normal code only through atomics
+   (single-producer/single-consumer rings and counters) and the
+   scheduler's interrupt-safe cell, which they use to wake threads.
 4. Normal code reads shared values one atomic at a time and tolerates them
    changing between reads. Statistics take one snapshot of each counter;
    an earlier version read a counter twice and underflowed when a tick
    arrived in between, which the stack-overflow smoke scenario caught.
-5. The main loop sleeps with `sti; hlt` only after finding no pending input
-   with interrupts disabled. `sti` takes effect after the next instruction,
-   so a wake-up between the check and the halt is not lost.
+5. The event loop (the `ui` thread) blocks until the next interrupt only
+   after finding no pending input with interrupts disabled; the block is
+   recorded before interrupts are enabled again, so a wake-up between the
+   check and the block is not lost. Other threads run meanwhile; the idle
+   thread halts with `sti; hlt` under the same rule.
 
 CPU exceptions keep the Phase 02 policy (report, then panic; the panic
 handler disables interrupts first).

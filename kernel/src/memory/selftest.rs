@@ -351,6 +351,7 @@ fn paging(c: &mut Checker) {
             Flags {
                 writable: true,
                 executable: true,
+                user: false,
             },
         ) == Err(MemError::Map(MapError::WriteExecute)),
     );

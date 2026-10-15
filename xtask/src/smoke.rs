@@ -10,6 +10,11 @@
 //! The `input` scenario then drives the guest's PS/2 keyboard and mouse with
 //! QMP `input-send-event` (see [`interact`]) and checks the kernel's serial
 //! event log and a second screenshot.
+//!
+//! The `processes` scenario waits for the user-process test driver (`init`)
+//! to finish, checks the kernel's own reports of every contained user fault
+//! (see [`USER_FAULTS`]), then checks that the kernel is still alive and
+//! responsive ([`after_processes`]).
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -47,10 +52,15 @@ pub enum Scenario {
     /// Normal image, then keyboard and mouse input through QMP: key events,
     /// pointer movement, button clicks, bursts, and the timer heartbeat.
     Input,
+    /// Normal image: `init` runs the user-process tests (IPC, preemption of
+    /// CPU-bound processes, fault containment, system-call validation); the
+    /// kernel reports every user fault, survives them all and still takes
+    /// input afterwards.
+    Processes,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 7] = [
+    pub const ALL: [Scenario; 8] = [
         Self::Boot,
         Self::Panic,
         Self::NoDisplay,
@@ -58,6 +68,7 @@ impl Scenario {
         Self::StackOverflow,
         Self::InterruptFault,
         Self::Input,
+        Self::Processes,
     ];
 
     pub fn parse(name: &str) -> Result<Vec<Scenario>, String> {
@@ -71,7 +82,7 @@ impl Scenario {
             .ok_or_else(|| {
                 format!(
                     "unknown scenario `{name}` (expected boot, panic, no-display, page-fault, \
-                     stack-overflow, interrupt-fault, input or all)"
+                     stack-overflow, interrupt-fault, input, processes or all)"
                 )
             })
     }
@@ -85,13 +96,14 @@ impl Scenario {
             Self::StackOverflow => "stack-overflow",
             Self::InterruptFault => "interrupt-fault",
             Self::Input => "input",
+            Self::Processes => "processes",
         }
     }
 
     /// Kernel feature of the fault-test build this scenario boots, if any.
     pub const fn kernel_feature(self) -> Option<&'static str> {
         match self {
-            Self::Boot | Self::NoDisplay | Self::Input => None,
+            Self::Boot | Self::NoDisplay | Self::Input | Self::Processes => None,
             Self::Panic => Some("deliberate-panic"),
             Self::PageFault => Some("deliberate-page-fault"),
             Self::StackOverflow => Some("deliberate-stack-overflow"),
@@ -124,7 +136,11 @@ impl Scenario {
         if log.contains(markers::INTERRUPTS_FAILED) {
             return Verdict::Fail("interrupts could not be enabled".into());
         }
+        if has_line(log, markers::SCHED_SELFTEST_FAIL) || has_line(log, markers::SCHED_FAILED) {
+            return Verdict::Fail("scheduler failed to start or its self-test failed".into());
+        }
         match self {
+            Self::Processes => judge_processes(log),
             Self::Boot | Self::Input => {
                 if log.contains(markers::PANIC) || log.contains(markers::CPU_EXCEPTION) {
                     Verdict::Fail("kernel panicked or took a CPU exception".into())
@@ -137,6 +153,8 @@ impl Scenario {
                         Verdict::Fail("BOOT OK without an input self-test pass".into())
                     } else if !log.contains(markers::UI_READY) {
                         Verdict::Fail("BOOT OK without the interactive screen".into())
+                    } else if !has_line(log, markers::SCHED_SELFTEST_PASS) {
+                        Verdict::Fail("BOOT OK without a scheduler self-test pass".into())
                     } else {
                         Verdict::Pass
                     }
@@ -242,6 +260,153 @@ impl Scenario {
             }
         }
     }
+}
+
+/// Whether some line of `log` starts with `marker`. Used for markers whose
+/// text a user process could also print: user output never starts a line
+/// (the kernel prefixes it with `[user <name>/<pid>]`).
+fn has_line(log: &str, marker: &str) -> bool {
+    log.lines().any(|l| l.starts_with(marker))
+}
+
+/// Kernel lines starting with `marker`.
+fn lines_with<'a>(log: &'a str, marker: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+    log.lines().filter(move |l| l.starts_with(marker))
+}
+
+/// What the kernel must report for the crashes `init` provokes: (text in a
+/// `USER FAULT` line, minimum number of such lines, what it shows).
+const USER_FAULTS: [(&str, usize, &str); 7] = [
+    ("page not present, read, user mode", 1, "null-pointer read"),
+    (
+        "protection violation, read, user mode",
+        1,
+        "read of a mapped kernel page",
+    ),
+    (
+        "protection violation, write, user mode",
+        1,
+        "write to a mapped kernel page",
+    ),
+    (
+        "protection violation, instruction fetch, user mode",
+        1,
+        "jump into kernel memory",
+    ),
+    (
+        "general protection fault (#GP, vector 13)",
+        2,
+        "privileged instruction and port I/O",
+    ),
+    (
+        "invalid opcode (#UD, vector 6)",
+        2,
+        "ud2 and a disabled SSE instruction",
+    ),
+    (
+        "page not present, write, user mode",
+        1,
+        "user stack overflow into its guard page",
+    ),
+];
+
+/// Lowest kernel (upper-half) address.
+const KERNEL_HALF: u64 = 0xffff_8000_0000_0000;
+
+fn judge_processes(log: &str) -> Verdict {
+    if log.contains(markers::PANIC) || log.contains(markers::CPU_EXCEPTION) {
+        return Verdict::Fail("kernel panicked or took a CPU exception".into());
+    }
+    if has_line(log, markers::BOOT_DEGRADED) {
+        return Verdict::Fail("kernel reported BOOT DEGRADED".into());
+    }
+    if has_line(log, markers::PROCESS_TESTS_FAIL) {
+        return Verdict::Fail("the process tests failed (see the init lines)".into());
+    }
+    if !has_line(log, markers::PROCESS_TESTS_PASS) {
+        return Verdict::Pending;
+    }
+    for (marker, what) in [
+        (markers::SCHED_SELFTEST_PASS, "scheduler self-test pass"),
+        (markers::PROGRAMS_READY, "program bundle report"),
+        (markers::BOOT_OK, "BOOT OK"),
+    ] {
+        if !has_line(log, marker) {
+            return Verdict::Fail(format!("process tests passed without a {what}"));
+        }
+    }
+    let faults: Vec<&str> = lines_with(log, markers::USER_FAULT).collect();
+    for (cause, min, what) in USER_FAULTS {
+        let n = faults.iter().filter(|l| l.contains(cause)).count();
+        if n < min {
+            return Verdict::Fail(format!(
+                "{n} kernel USER FAULT report(s) for {what} (`{cause}`), expected {min}"
+            ));
+        }
+    }
+    // The kernel-memory reads and writes really targeted the kernel half.
+    for line in faults.iter().filter(|l| l.contains("protection violation")) {
+        if !fault_address(line).is_some_and(|a| a >= KERNEL_HALF) {
+            return Verdict::Fail(format!("protection fault not on a kernel address: {line}"));
+        }
+    }
+    let terminated = lines_with(log, markers::PROCESS_EXITED)
+        .filter(|l| l.contains("terminated by fault vector"))
+        .count();
+    if terminated < faults.len() || faults.len() < 9 {
+        return Verdict::Fail(format!(
+            "{} user faults and {terminated} terminated processes, expected 9 of each",
+            faults.len()
+        ));
+    }
+    if !lines_with(log, markers::PROCESS_EXITED).any(|l| l.contains("init (pid 1): exit code 0")) {
+        return Verdict::Fail("no kernel report that init exited with code 0".into());
+    }
+    Verdict::Pass
+}
+
+/// The `address 0x...` (CR2) of a user page-fault report.
+fn fault_address(line: &str) -> Option<u64> {
+    let hex = line.split("address 0x").nth(1)?;
+    let digits: String = hex.chars().take_while(char::is_ascii_hexdigit).collect();
+    u64::from_str_radix(&digits, 16).ok()
+}
+
+/// After the process tests: the kernel keeps running (a new timer
+/// heartbeat) and the UI thread still handles input.
+fn after_processes(vm: &mut Vm, serial_log: &Path, deadline: Instant) -> Result<String, String> {
+    let mut w = Watcher::new(serial_log, deadline);
+    let log = w.read();
+    let pass_at = log
+        .find(markers::PROCESS_TESTS_PASS)
+        .ok_or("process-test pass marker vanished")?;
+    let heartbeat = w.wait(
+        "a timer heartbeat after the process tests",
+        Duration::from_secs(30),
+        |log| log[pass_at..].contains(markers::TIMER_HEARTBEAT),
+    )?;
+    let from = heartbeat.len();
+    send_events(vm, &[key_event("p", true), key_event("p", false)])?;
+    let expected = [
+        format!("{} press P (scancode 0x19) char 'p'", markers::INPUT_KEY),
+        format!("{} release P (scancode 0x19)", markers::INPUT_KEY),
+    ];
+    w.wait(
+        "a key event after the process tests",
+        Duration::from_secs(20),
+        |log| in_order(log, from, &expected),
+    )?;
+    let log = w.read();
+    let faults = lines_with(&log, markers::USER_FAULT).count();
+    let started = lines_with(&log, markers::PROCESS_STARTED).count();
+    let init_checks = log
+        .lines()
+        .filter(|l| l.starts_with(markers::USER_OUTPUT) && l.contains("init: ok "))
+        .count();
+    Ok(format!(
+        "[smoke:processes] {started} processes started, {faults} user faults contained, \
+         {init_checks} init checks ok; kernel heartbeat and key input still work afterwards"
+    ))
 }
 
 /// The text from the panic marker on, once the report is complete.
@@ -375,6 +540,20 @@ pub fn run(scenario: Scenario, image: &Path, setup: &Setup) -> Result<String, St
         serial_log.display()
     );
     let mut input = None;
+    if scenario == Scenario::Processes {
+        let deadline = started + setup.timeout;
+        match after_processes(&mut vm, &serial_log, deadline) {
+            Ok(report) => summary = format!("{summary}\n{report}"),
+            Err(err) => {
+                vm.quit();
+                return Err(format!(
+                    "[smoke:processes] FAIL: {err}\n--- serial log tail ({}) ---\n{}",
+                    serial_log.display(),
+                    tail(&read_lossy(&serial_log), 30)
+                ));
+            }
+        }
+    }
     if scenario == Scenario::Input {
         let deadline = started + setup.timeout;
         match interact(&mut vm, &serial_log, deadline) {
@@ -1100,13 +1279,21 @@ mod tests {
     fn boot_scenario_verdicts() {
         assert_eq!(Scenario::Boot.judge(""), Verdict::Pending);
         let good = format!(
-            "{ENTERED}{} (5 checks)\n{} (17 checks)\n{} button at 1,2 3x4; pointer at 5,6\n\
-             [rust-os] BOOT OK: done\n",
+            "{ENTERED}{} (5 checks)\n{} (17 checks)\n{} (9 of 9 checks)\n\
+             {} button at 1,2 3x4; pointer at 5,6\n[rust-os] BOOT OK: done\n",
             markers::MEMORY_SELFTEST_PASS,
             markers::INPUT_SELFTEST_PASS,
+            markers::SCHED_SELFTEST_PASS,
             markers::UI_READY
         );
         assert_eq!(Scenario::Boot.judge(&good), Verdict::Pass);
+        let no_sched = good.replace(markers::SCHED_SELFTEST_PASS, "x");
+        assert!(matches!(Scenario::Boot.judge(&no_sched), Verdict::Fail(_)));
+        let sched_failed = format!("{good}{} (8 of 9)\n", markers::SCHED_SELFTEST_FAIL);
+        assert!(matches!(
+            Scenario::Boot.judge(&sched_failed),
+            Verdict::Fail(_)
+        ));
         assert_eq!(Scenario::Input.judge(&good), Verdict::Pass);
         // Input self-test missing or failed.
         let no_input = good.replace(markers::INPUT_SELFTEST_PASS, "x");
@@ -1362,5 +1549,122 @@ mod tests {
             assert_eq!(Scenario::parse(s.name()).unwrap(), vec![s]);
         }
         assert!(Scenario::parse("bogus").is_err());
+    }
+
+    /// Serial log of a passing `processes` run (abridged real output).
+    fn processes_log() -> String {
+        let faults = [
+            "fault (pid 6): page fault (#PF, vector 14) at rip 0x402cbb; address 0x0: \
+             page not present, read, user mode; process terminated",
+            "fault (pid 7): page fault (#PF, vector 14) at rip 0x402bf6; address \
+             0xffff80000014fc20: protection violation, read, user mode; process terminated",
+            "fault (pid 8): page fault (#PF, vector 14) at rip 0x402b11; address \
+             0xffff80000014fc20: protection violation, write, user mode; process terminated",
+            "fault (pid 9): page fault (#PF, vector 14) at rip 0xffff80000014fc20; address \
+             0xffff80000014fc20: protection violation, instruction fetch, user mode; \
+             process terminated",
+            "fault (pid 10): general protection fault (#GP, vector 13) at rip 0x402a43; \
+             process terminated",
+            "fault (pid 11): general protection fault (#GP, vector 13) at rip 0x40299f; \
+             process terminated",
+            "fault (pid 12): invalid opcode (#UD, vector 6) at rip 0x402875; process terminated",
+            "fault (pid 13): invalid opcode (#UD, vector 6) at rip 0x402791; process terminated",
+            "fault (pid 14): page fault (#PF, vector 14) at rip 0x402ce7; address 0x7ffefe10: \
+             page not present, write, user mode; process terminated",
+        ];
+        let mut log = format!(
+            "{ENTERED}{} (9 of 9 checks)\n{} 5 of 5 programs\n[rust-os] BOOT OK: done\n",
+            markers::SCHED_SELFTEST_PASS,
+            markers::PROGRAMS_READY
+        );
+        for (i, f) in faults.iter().enumerate() {
+            log.push_str(&format!("{} {f}\n", markers::USER_FAULT));
+            log.push_str(&format!(
+                "{} fault (pid {}): terminated by fault vector 14; ran 2 ms\n",
+                markers::PROCESS_EXITED,
+                i + 6
+            ));
+        }
+        log.push_str(&format!(
+            "{} init (pid 1): exit code 0; ran 1152 ms\n{}: init ran every process test\n",
+            markers::PROCESS_EXITED,
+            markers::PROCESS_TESTS_PASS
+        ));
+        log
+    }
+
+    #[test]
+    fn processes_scenario_passes_on_a_complete_log() {
+        let good = processes_log();
+        assert_eq!(Scenario::Processes.judge(&good), Verdict::Pass);
+        let pending = good.replace(markers::PROCESS_TESTS_PASS, "x");
+        assert_eq!(Scenario::Processes.judge(&pending), Verdict::Pending);
+    }
+
+    #[test]
+    fn processes_scenario_needs_every_kernel_fault_report() {
+        let good = processes_log();
+        for (cause, _, what) in USER_FAULTS {
+            let broken = good.replacen(cause, "something else", 1);
+            assert!(
+                matches!(Scenario::Processes.judge(&broken), Verdict::Fail(_)),
+                "{what}"
+            );
+        }
+        // A "kernel memory" fault on a user address does not count.
+        let user_addr = good.replace(
+            "address 0xffff80000014fc20: protection violation, read",
+            "address 0x500000: protection violation, read",
+        );
+        assert!(matches!(
+            Scenario::Processes.judge(&user_addr),
+            Verdict::Fail(_)
+        ));
+        // Every faulting process must have been reported as terminated.
+        let not_terminated = good.replacen("terminated by fault vector", "exit code 0", 1);
+        assert!(matches!(
+            Scenario::Processes.judge(&not_terminated),
+            Verdict::Fail(_)
+        ));
+        let no_init_exit = good.replace("init (pid 1): exit code 0", "init (pid 1): exit code 3");
+        assert!(matches!(
+            Scenario::Processes.judge(&no_init_exit),
+            Verdict::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn processes_scenario_ignores_markers_printed_by_user_code() {
+        // A process printing the pass marker does not count: user output
+        // never starts a line.
+        let spoof = format!(
+            "{ENTERED}{} (9 of 9 checks)\n[user evil/3] {}: fake\n",
+            markers::SCHED_SELFTEST_PASS,
+            markers::PROCESS_TESTS_PASS
+        );
+        assert_eq!(Scenario::Processes.judge(&spoof), Verdict::Pending);
+        let failed = format!(
+            "{}{}: init ended with exit code 2\n",
+            processes_log(),
+            markers::PROCESS_TESTS_FAIL
+        );
+        assert!(matches!(
+            Scenario::Processes.judge(&failed),
+            Verdict::Fail(_)
+        ));
+        let kernel_fault = format!("{}{} page fault\n", processes_log(), markers::CPU_EXCEPTION);
+        assert!(matches!(
+            Scenario::Processes.judge(&kernel_fault),
+            Verdict::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn parses_user_fault_addresses() {
+        assert_eq!(
+            fault_address("x; address 0xffff800000001000: y"),
+            Some(0xffff_8000_0000_1000)
+        );
+        assert_eq!(fault_address("no address here"), None);
     }
 }

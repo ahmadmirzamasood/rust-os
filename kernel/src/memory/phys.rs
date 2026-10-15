@@ -4,9 +4,10 @@
 //! `max(highest memory-map address, 4 GiB)` at a fixed virtual offset,
 //! writable and non-executable (requested in the kernel's
 //! `BootloaderConfig`). This module is the only code that turns physical
-//! addresses into pointers, and only for two purposes: page-table entries
-//! and whole frames the memory manager owns. General kernel code never gets
-//! raw physical access.
+//! addresses into pointers, and only for three purposes: page-table
+//! entries, whole frames the memory manager owns, and copies to and from
+//! user pages (after the caller checked the user mapping). General kernel
+//! code never gets raw physical access.
 
 use mm::PhysFrame;
 use mm::paging::{ENTRIES, TableAccess};
@@ -91,6 +92,42 @@ impl PhysWindow {
         let ptr = core::ptr::with_exposed_provenance::<u64>(self.frame_virt(frame) as usize);
         // SAFETY: as in `zero_frame`; frames are 4 KiB aligned.
         unsafe { ptr.read_volatile() }
+    }
+
+    /// Copy `data` into `frame` at byte `offset`.
+    ///
+    /// # Safety
+    ///
+    /// No Rust reference may alias the frame's bytes (true for frames the
+    /// memory manager owns: page tables and user pages, which only the CPU
+    /// and this module access). `offset + data.len()` must not exceed a
+    /// page (asserted).
+    pub unsafe fn write_bytes(&mut self, frame: PhysFrame, offset: usize, data: &[u8]) {
+        assert!(
+            offset + data.len() <= PAGE_SIZE as usize,
+            "copy crosses a frame"
+        );
+        let base = self.frame_virt(frame) as usize + offset;
+        let ptr = core::ptr::with_exposed_provenance_mut::<u8>(base);
+        // SAFETY: inside the window (frame_virt checked) and inside the
+        // frame (asserted); `data` is kernel memory, so no overlap.
+        unsafe { ptr.copy_from_nonoverlapping(data.as_ptr(), data.len()) };
+    }
+
+    /// Copy bytes from `frame` at `offset` into `out`.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::write_bytes`].
+    pub unsafe fn read_bytes(&mut self, frame: PhysFrame, offset: usize, out: &mut [u8]) {
+        assert!(
+            offset + out.len() <= PAGE_SIZE as usize,
+            "copy crosses a frame"
+        );
+        let base = self.frame_virt(frame) as usize + offset;
+        let ptr = core::ptr::with_exposed_provenance::<u8>(base);
+        // SAFETY: as in `write_bytes`.
+        unsafe { ptr.copy_to_nonoverlapping(out.as_mut_ptr(), out.len()) };
     }
 
     fn entry_ptr(&self, table: PhysFrame, index: usize) -> *mut u64 {

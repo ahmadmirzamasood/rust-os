@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Host build tool: lint, test, kernel build, disk image, QEMU launch and boot smoke test, private-file check."
+description = "Host build tool: lint, test, kernel and user-program builds, program bundle, disk image, QEMU launch and boot smoke test, private-file check."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,10 @@ rust-version.workspace = true
 # the kernel uses. Both are no_std, dependency-light and build on the host.
 boot-data.workspace = true
 gfx.workspace = true
+# The program bundle format and the ELF checks the kernel's loader uses, so
+# a bad user program fails the build instead of the boot.
+exec.workspace = true
+os-abi.workspace = true
 
 [lints]
 workspace = true

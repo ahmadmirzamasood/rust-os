@@ -19,9 +19,15 @@ The kernel's `BootloaderConfig` asks `bootloader` 0.11.17 for:
 The bootloader also enables `EFER.NXE` and `CR0.WP` and maps the kernel's ELF
 segments with their own permissions. The kernel checks these at start-up
 (and turns them on if they are off), and enables SMEP and SMAP when CPUID
-reports them and no user-accessible page exists. With QEMU's default CPU
-model SMEP/SMAP are reported unsupported; with `-cpu max` the kernel enables
-both.
+reports them and no user-accessible page exists at boot. With QEMU's default
+CPU model SMEP/SMAP are reported unsupported; with `-cpu max` the kernel
+enables both, and user processes still work because the kernel never touches
+user pages through user addresses (see
+[processes.md](processes.md#user-memory-access-by-the-kernel)).
+
+All of the bootloader's chosen mappings are placed in the upper half
+(`dynamic_range_start`), leaving the lower half to user processes; see
+ADR-015.
 
 ## CPU tables and faults
 
@@ -85,12 +91,14 @@ Consequences the code relies on:
 
 **Ownership.** The bootloader's mappings are foreign: the kernel never
 edits them. At start-up it claims the first unused upper-half PML4 slot
-(512 GiB) and only ever maps, unmaps or changes permissions inside it:
+(512 GiB) and only ever maps, unmaps or changes permissions inside it (plus
+the lower halves of process address spaces, which it owns completely; see
+[processes.md](processes.md#address-spaces)):
 
 | Offset in the slot | Use |
 | --- | --- |
 | 0 – 1 GiB | Kernel heap (grows upward) |
-| 256 GiB – 384 GiB | Kernel stacks: each is a guard page plus its pages; never reused |
+| 256 GiB – 384 GiB | Kernel stacks (double-fault stack, one per thread): each is a guard page plus its pages; frames are freed when a thread is reaped, address space is never reused |
 | 384 GiB – 512 GiB | Scratch pages for self-tests; never reused |
 
 All page-table edits go through `mm::paging::Mapper` while holding the
@@ -166,7 +174,7 @@ kernel's slot.
 - Only 4 KiB pages are created. The physical-memory window maps everything,
   including device ranges, with default caching; it is used only for RAM
   frames and page tables.
-- No user space: all mappings are supervisor-only, and SMEP/SMAP only guard
-  against bugs.
+- User pages exist only in process address spaces (lower half); every
+  kernel mapping is supervisor-only.
 - The kernel's own image permissions come from the bootloader's ELF loading
   and are audited (no W+X found) but not re-mapped by the kernel.

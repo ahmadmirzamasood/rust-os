@@ -213,3 +213,87 @@ multi-byte sequences.
 **Verified:** a deliberate 8 s main-loop stall overflowed both rings in
 QEMU; the system recovered without corruption or deadlock (see
 [interrupts-input.md](interrupts-input.md)).
+
+## ADR-015 — Lower half for processes, upper half for the kernel
+
+**Decision:** the bootloader places every mapping it chooses (kernel
+image, boot stack, boot information, framebuffer, physical-memory window,
+ramdisk) in the upper half (`dynamic_range_start = 0xffff_8000_0000_0000`).
+Each process gets its own PML4 whose upper half is a copy of the kernel's
+entries and whose lower half holds only its own pages.
+
+**Why:** a fixed split makes "is this a user address?" a range check, keeps
+kernel mappings identical in every address space, and needs no change to the
+kernel's own mapping rules (it still only edits its own slot). The kernel
+never adds an upper-half PML4 entry after boot, so the copies stay valid.
+
+**Cost:** relies on that invariant; adding kernel PML4 entries later would
+need propagation to every process. The bootloader's identity-mapped
+trampoline stays in the kernel's own PML4 (lower half) but is not copied
+into processes.
+
+## ADR-016 — Preemptive round-robin; preemption off while a lock is held
+
+**Decision:** one CPU, one FIFO ready queue, a 10 ms slice measured with the
+TSC and checked on the timer interrupt; switching happens when an interrupt
+or system call returns. Scheduler and process state live in an `IrqCell`
+(interrupts disabled while used). Holding any `TryLock` disables
+preemption, and blocking while holding one is a checked bug.
+
+**Why:** the existing kernel relies on `TryLock` never being contended
+outside exception re-entry. Disabling preemption while one is held keeps
+that true without spinning or sleeping locks, and keeps interrupts enabled
+during long work such as screen updates (unlike disabling interrupts).
+Round-robin is the simplest policy that guarantees every runnable thread
+progresses.
+
+**Rejected for now:** priorities, per-thread wait queues, sleeping
+mutexes (nothing needs them yet), `swapgs`-based per-CPU data (one CPU).
+
+**Cost:** a long locked section delays preemption to the next tick after
+it. Revisit for SMP.
+
+## ADR-017 — `int 0x80` system calls, handles, channels
+
+**Decision:** system calls enter through a DPL-3 interrupt gate at vector
+0x80, reusing the interrupt entry path (full register frame, same stack
+switch through TSS.RSP0). The interface is in `os-abi`, versioned
+(`ABI_VERSION` 1), with twelve calls driven by the test programs.
+Resources are named by per-process, generation-checked handles; IPC is
+bounded bidirectional message channels whose endpoints move to a child at
+spawn.
+
+**Why:** one entry path means one place that saves state and one place that
+can preempt. No `swapgs` or MSR setup is needed. Handles in a per-process
+table make "can this process name that object?" a table lookup.
+
+**Rejected for now:** `syscall`/`sysret` (faster, but needs `swapgs`, a
+separate entry stub and care with non-canonical return addresses; the GDT
+order already allows it); POSIX-like file descriptors (no files yet).
+
+## ADR-018 — Static ELF programs in a boot bundle
+
+**Decision:** user programs are static, non-PIE `ET_EXEC` files linked at
+`0x400000`, checked by a host-tested parser (`crates/exec`) at build time and
+again at boot, and shipped as one project-defined bundle that the bootloader
+loads as its ramdisk.
+
+**Why:** there is no file system yet; the ramdisk path already exists in the
+bootloader. Static executables need no relocation or dynamic linker, so the
+loader is small and every field it trusts is validated.
+
+**Cost:** fixed link address (no ASLR); programs are known at image-build
+time.
+
+## ADR-019 — x87/SSE/AVX disabled
+
+**Decision:** at boot the kernel sets CR0.EM and clears CR4.OSFXSR,
+OSXMMEXCPT and OSXSAVE. The kernel and user programs are compiled
+soft-float.
+
+**Why:** the scheduler does not save FPU/SIMD registers. With the units
+enabled (UEFI leaves SSE on), one process could read register values another
+left behind. Disabled, such code is terminated instead.
+
+**Cost:** user programs cannot use floating-point hardware. Enabling it
+later needs `xsave`/`fxsave` state per thread.
