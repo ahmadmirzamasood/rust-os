@@ -4,20 +4,29 @@
 //!
 //! 1. Mask interrupts and bring up the serial port, so every later failure is
 //!    reported.
-//! 2. Validate the boot information: bootloader API version, then copy the
+//! 2. Install the kernel's GDT, TSS and IDT, so CPU exceptions (including a
+//!    double fault from a stack overflow) are reported instead of resetting
+//!    the machine.
+//! 3. Validate the boot information: bootloader API version, then copy the
 //!    memory map into kernel-owned storage and check it.
-//! 3. Take ownership of the framebuffer, validate its geometry and pixel
-//!    format, and draw the welcome screen. Graphics failure is reported and
-//!    the kernel continues on serial only.
-//! 4. Print `[rust-os] BOOT OK` (or `BOOT DEGRADED`) and halt the CPU.
+//! 4. Take ownership of the framebuffer and validate its geometry and pixel
+//!    format. Graphics failure is reported and the kernel continues on serial
+//!    only.
+//! 5. Set up memory management (frames, kernel mappings, heap, guarded
+//!    double-fault stack) and run the memory self-test.
+//! 6. Draw the welcome screen, print `[rust-os] BOOT OK` (or
+//!    `BOOT DEGRADED`) and halt the CPU.
 //!
-//! There is no interrupt handling, memory allocator or scheduler yet.
+//! External interrupts stay masked; there is no scheduler yet.
 
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 mod arch;
 mod display;
+mod memory;
 mod panic;
 mod serial;
 mod sync;
@@ -26,7 +35,7 @@ use core::fmt::Write;
 
 use boot_data::markers;
 use boot_data::memory::{MemoryMap, MemoryMapError, MemorySummary};
-use bootloader_api::config::ApiVersion;
+use bootloader_api::config::{ApiVersion, BootloaderConfig, Mapping};
 use bootloader_api::info::MemoryRegion;
 use bootloader_api::{BootInfo, entry_point};
 use gfx::screens::{StageState, StatusLine, Welcome};
@@ -35,7 +44,20 @@ use gfx::{FmtBuf, Layout};
 use crate::display::DisplayError;
 use crate::sync::TryLock;
 
-entry_point!(kernel_main);
+/// Boot stack size. The bootloader maps it with an unmapped guard page below.
+const KERNEL_STACK_SIZE: u64 = 128 * 1024;
+
+/// What the kernel asks of the bootloader, beyond the defaults.
+static BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    // Map all physical memory at a bootloader-chosen offset (writable,
+    // no-execute). Only `memory::phys` uses it, for page tables and frames.
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config.kernel_stack_size = KERNEL_STACK_SIZE;
+    config
+};
+
+entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 /// Capacity of the kernel's copy of the memory map. QEMU with OVMF reports
 /// well under 100 regions; exceeding this is reported as invalid boot data.
@@ -55,6 +77,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     let mut degraded = false;
 
+    // --- CPU tables -------------------------------------------------------
+    if arch::x86_64::tables::init() {
+        let (bottom, top) = arch::x86_64::tables::emergency_stack();
+        kprintln!(
+            "[rust-os] CPU tables: GDT with TSS, IDT for exception vectors 0-31; \
+             double faults on IST1 (bootstrap stack {:#x}..{:#x})",
+            bottom,
+            top
+        );
+    }
+
     // --- Boot information -------------------------------------------------
     let api_ok = check_api_version(boot_info.api_version);
     degraded |= !api_ok;
@@ -69,11 +102,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         Some(addr) => kprintln!("[rust-os] ACPI RSDP at phys {:#x}", addr),
         None => kprintln!("[rust-os] ACPI RSDP not provided"),
     }
-    // The default bootloader config maps no physical-memory window; memory
-    // management sets one up in a later phase.
     match boot_info.physical_memory_offset.as_ref() {
         Some(offset) => kprintln!("[rust-os] physical memory mapped at {:#x}", offset),
-        None => kprintln!("[rust-os] physical memory not mapped (not requested)"),
+        None => kprintln!("[rust-os] physical memory NOT mapped (requested in config)"),
     }
 
     let memory = load_memory_map(&boot_info.memory_regions);
@@ -118,8 +149,19 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             );
         }
     }
+
+    // --- Memory management --------------------------------------------------
+    let mm_status = init_memory(boot_info, memory.is_ok());
+    degraded |= !matches!(
+        mm_status,
+        MemoryStatus::Ready {
+            selftest_ok: true,
+            ..
+        }
+    );
+
     if let Ok(layout) = &graphics {
-        let drawn = draw_welcome(serial_ok, api_ok, &memory, layout);
+        let drawn = draw_welcome(serial_ok, api_ok, &memory, &mm_status, layout);
         if drawn {
             kprintln!("[rust-os] welcome screen drawn");
         } else {
@@ -132,7 +174,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 }
 
 /// Report the boot outcome and halt.
-#[cfg(not(feature = "deliberate-panic"))]
+#[cfg(not(any(
+    feature = "deliberate-panic",
+    feature = "deliberate-page-fault",
+    feature = "deliberate-stack-overflow"
+)))]
 fn finish(degraded: bool) -> ! {
     if degraded {
         kprintln!(
@@ -153,6 +199,129 @@ fn finish(degraded: bool) -> ! {
 #[cfg(feature = "deliberate-panic")]
 fn finish(_degraded: bool) -> ! {
     panic!("{}", markers::DELIBERATE_PANIC_MESSAGE)
+}
+
+/// Smoke-test build: write into the unmapped guard page below the
+/// double-fault stack. Expected: a page-fault report naming that guard page,
+/// then the panic banner.
+#[cfg(feature = "deliberate-page-fault")]
+fn finish(_degraded: bool) -> ! {
+    let guard = memory::find_guard(markers::DOUBLE_FAULT_STACK_GUARD)
+        .expect("double-fault stack guard registered");
+    kprintln!("{} write to {:#x}", markers::DELIBERATE_FAULT, guard + 0x10);
+    let target = core::ptr::with_exposed_provenance_mut::<u64>((guard + 0x10) as usize);
+    // SAFETY: deliberately faulting: the guard page is unmapped, so this
+    // write raises a page fault and the kernel stops with a report. The write
+    // never completes, so no memory is modified.
+    unsafe { target.write_volatile(0xdead_beef) };
+    panic!("deliberate page fault did not fault")
+}
+
+/// Smoke-test build: recurse until the boot stack runs into its guard page.
+/// Expected: a double fault (handled on the IST stack) whose report names the
+/// boot stack's guard page, then the panic banner.
+#[cfg(feature = "deliberate-stack-overflow")]
+fn finish(_degraded: bool) -> ! {
+    #[allow(unconditional_recursion)]
+    fn recurse(depth: u64) -> u64 {
+        let frame = core::hint::black_box([depth; 64]);
+        recurse(depth + 1).wrapping_add(core::hint::black_box(frame[0]))
+    }
+    kprintln!(
+        "{} unbounded recursion on the boot stack",
+        markers::DELIBERATE_FAULT
+    );
+    let result = recurse(0);
+    panic!("deliberate stack overflow returned {result}")
+}
+
+/// Outcome of memory-management setup.
+#[derive(Debug, Clone, Copy)]
+enum MemoryStatus {
+    /// Skipped because the memory map was invalid.
+    Skipped,
+    Failed(memory::InitError),
+    Ready {
+        usable_mib: u64,
+        free_mib: u64,
+        selftest_ok: bool,
+    },
+}
+
+fn init_memory(boot_info: &BootInfo, map_ok: bool) -> MemoryStatus {
+    if !map_ok {
+        kprintln!("[rust-os] memory management skipped: memory map invalid");
+        return MemoryStatus::Skipped;
+    }
+    let Some(map) = MEMORY_MAP.try_lock() else {
+        return MemoryStatus::Skipped;
+    };
+    let boot = memory::BootMemory {
+        regions: map.regions(),
+        physical_memory_offset: boot_info.physical_memory_offset.into_option(),
+        kernel_file: (boot_info.kernel_addr, boot_info.kernel_len),
+        stack: (boot_info.kernel_stack_bottom, boot_info.kernel_stack_len),
+    };
+    let report = match memory::init(&boot) {
+        Ok(report) => report,
+        Err(err) => {
+            kprintln!("{} {:?}", markers::MEMORY_INIT_FAILED, err);
+            return MemoryStatus::Failed(err);
+        }
+    };
+    let p = report.protections;
+    kprintln!(
+        "[rust-os] CPU protections: NX {:?}, write-protect {:?}, SMEP {:?}, SMAP {:?}",
+        p.no_execute,
+        p.write_protect,
+        p.smep,
+        p.smap
+    );
+    kprintln!(
+        "[rust-os] frames: {} usable frames ({} MiB) at or above 1 MiB; not used: {} KiB \
+         below 1 MiB, {} KiB beyond the bitmap, {} B unaligned",
+        report.frames.managed_frames,
+        report.frames.managed_frames * 4 / 1024,
+        report.frames.below_minimum_bytes / 1024,
+        report.frames.beyond_capacity_bytes / 1024,
+        report.frames.unaligned_bytes
+    );
+    kprintln!(
+        "[rust-os] boot mappings: {} page tables, {} leaf mappings (physical window at {:#x} \
+         excluded); {} usable frames were in use and are now reserved; {} W+X, {} user",
+        report.page_tables,
+        report.boot_leaves,
+        report.window_offset,
+        report.withdrawn_frames,
+        report.writable_executable_leaves,
+        report.user_leaves
+    );
+    kprintln!(
+        "[rust-os] kernel region at {:#x}: heap at {:#x} ({} KiB mapped), double-fault stack \
+         {:#x}..{:#x}, guard page at {:#x}",
+        report.slot_base,
+        report.heap_base,
+        memory::heap::INITIAL_SIZE / 1024,
+        report.double_fault_stack.bottom,
+        report.double_fault_stack.top,
+        report.double_fault_stack.guard
+    );
+    kprintln!(
+        "{} {} frames free ({} MiB)",
+        markers::MEMORY_READY,
+        report.free_frames,
+        report.free_frames * 4 / 1024
+    );
+
+    let outcome = memory::selftest::run(&memory::selftest::Environment {
+        regions: map.regions(),
+        kernel_file: boot.kernel_file,
+    });
+    MemoryStatus::Ready {
+        usable_mib: report.frames.managed_frames * 4 / 1024,
+        free_mib: memory::free_frames() * 4 / 1024,
+        selftest_ok: outcome.passed(),
+    }
 }
 
 #[derive(Debug)]
@@ -202,6 +371,7 @@ fn draw_welcome(
     serial_ok: bool,
     api_ok: bool,
     memory: &Result<MemorySummary, MemoryMapError>,
+    mm_status: &MemoryStatus,
     layout: &Layout,
 ) -> bool {
     let state = |ok: bool| {
@@ -219,17 +389,47 @@ fn draw_welcome(
         if api_ok { "compatible" } else { "MISMATCH" }
     );
     let mut memory_line = FmtBuf::<64>::new();
-    match memory {
-        Ok(m) => {
+    let memory_ok = matches!(
+        mm_status,
+        MemoryStatus::Ready {
+            selftest_ok: true,
+            ..
+        }
+    );
+    match (memory, mm_status) {
+        (Err(err), _) => {
+            let _ = write!(memory_line, "map invalid: {:?}", err);
+        }
+        (
+            Ok(_),
+            MemoryStatus::Ready {
+                usable_mib,
+                free_mib,
+                selftest_ok,
+            },
+        ) => {
             let _ = write!(
                 memory_line,
-                "{} regions, {} MiB usable",
-                m.regions,
-                m.usable_bytes / (1024 * 1024)
+                "{} MiB usable, {} MiB free, self-test {}",
+                usable_mib,
+                free_mib,
+                if *selftest_ok { "passed" } else { "FAILED" }
             );
         }
-        Err(err) => {
-            let _ = write!(memory_line, "invalid: {:?}", err);
+        (Ok(m), MemoryStatus::Failed(err)) => {
+            let _ = write!(
+                memory_line,
+                "{} MiB; setup failed: {:?}",
+                m.usable_bytes / (1024 * 1024),
+                err
+            );
+        }
+        (Ok(m), MemoryStatus::Skipped) => {
+            let _ = write!(
+                memory_line,
+                "{} MiB usable; not managed",
+                m.usable_bytes / (1024 * 1024)
+            );
         }
     }
     let mut display_line = FmtBuf::<64>::new();
@@ -242,7 +442,7 @@ fn draw_welcome(
         layout.format(),
         layout.bytes_per_pixel()
     );
-    let all_ok = serial_ok && api_ok && memory.is_ok();
+    let all_ok = serial_ok && api_ok && memory.is_ok() && memory_ok;
 
     let lines = [
         StatusLine {
@@ -267,7 +467,7 @@ fn draw_welcome(
         StatusLine {
             label: "Memory",
             value: memory_line.as_str(),
-            state: state(memory.is_ok()),
+            state: state(memory.is_ok() && memory_ok),
         },
         StatusLine {
             label: "Display",

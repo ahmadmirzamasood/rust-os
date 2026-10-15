@@ -22,28 +22,45 @@ use crate::qemu::{self, Firmware};
 /// What a smoke run boots and expects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scenario {
-    /// Normal image: welcome screen and `BOOT OK`.
+    /// Normal image: memory self-test passes, welcome screen, `BOOT OK`.
     Boot,
     /// Image built with `deliberate-panic`: full panic report and banner.
     Panic,
     /// Normal image on a VM without a display adapter: graphics fails,
     /// serial diagnostics continue, `BOOT DEGRADED`.
     NoDisplay,
+    /// Image built with `deliberate-page-fault`: a write into an unmapped
+    /// guard page is reported as a page fault naming that guard page.
+    PageFault,
+    /// Image built with `deliberate-stack-overflow`: the boot stack runs
+    /// into its guard page; the double fault is handled on its own stack
+    /// and reported as a boot-stack overflow.
+    StackOverflow,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 3] = [Self::Boot, Self::Panic, Self::NoDisplay];
+    pub const ALL: [Scenario; 5] = [
+        Self::Boot,
+        Self::Panic,
+        Self::NoDisplay,
+        Self::PageFault,
+        Self::StackOverflow,
+    ];
 
     pub fn parse(name: &str) -> Result<Vec<Scenario>, String> {
-        match name {
-            "all" => Ok(Self::ALL.to_vec()),
-            "boot" => Ok(vec![Self::Boot]),
-            "panic" => Ok(vec![Self::Panic]),
-            "no-display" => Ok(vec![Self::NoDisplay]),
-            other => Err(format!(
-                "unknown scenario `{other}` (expected boot, panic, no-display or all)"
-            )),
+        if name == "all" {
+            return Ok(Self::ALL.to_vec());
         }
+        Self::ALL
+            .into_iter()
+            .find(|s| s.name() == name)
+            .map(|s| vec![s])
+            .ok_or_else(|| {
+                format!(
+                    "unknown scenario `{name}` (expected boot, panic, no-display, page-fault, \
+                     stack-overflow or all)"
+                )
+            })
     }
 
     pub const fn name(self) -> &'static str {
@@ -51,12 +68,24 @@ impl Scenario {
             Self::Boot => "boot",
             Self::Panic => "panic",
             Self::NoDisplay => "no-display",
+            Self::PageFault => "page-fault",
+            Self::StackOverflow => "stack-overflow",
         }
     }
 
-    /// Whether this scenario needs the `deliberate-panic` kernel.
-    pub const fn needs_panic_kernel(self) -> bool {
-        matches!(self, Self::Panic)
+    /// Kernel feature of the fault-test build this scenario boots, if any.
+    pub const fn kernel_feature(self) -> Option<&'static str> {
+        match self {
+            Self::Boot | Self::NoDisplay => None,
+            Self::Panic => Some("deliberate-panic"),
+            Self::PageFault => Some("deliberate-page-fault"),
+            Self::StackOverflow => Some("deliberate-stack-overflow"),
+        }
+    }
+
+    /// Whether the scenario ends with the on-screen panic banner.
+    const fn expects_banner(self) -> bool {
+        matches!(self, Self::Panic | Self::PageFault | Self::StackOverflow)
     }
 
     /// Judge the serial log so far.
@@ -64,28 +93,40 @@ impl Scenario {
         if !log.contains(markers::KERNEL_ENTERED) {
             return Verdict::Pending;
         }
+        if log.contains(markers::MEMORY_SELFTEST_FAIL) {
+            return Verdict::Fail("memory self-test failed".into());
+        }
+        if log.contains(markers::MEMORY_INIT_FAILED) {
+            return Verdict::Fail("memory management failed to initialize".into());
+        }
         match self {
             Self::Boot => {
-                if log.contains(markers::PANIC) {
-                    Verdict::Fail("kernel panicked".into())
+                if log.contains(markers::PANIC) || log.contains(markers::CPU_EXCEPTION) {
+                    Verdict::Fail("kernel panicked or took a CPU exception".into())
                 } else if log.contains(markers::BOOT_DEGRADED) {
                     Verdict::Fail("kernel reported BOOT DEGRADED".into())
                 } else if log.contains(markers::BOOT_OK) {
-                    Verdict::Pass
+                    if log.contains(markers::MEMORY_SELFTEST_PASS) {
+                        Verdict::Pass
+                    } else {
+                        Verdict::Fail("BOOT OK without a memory self-test pass".into())
+                    }
                 } else {
                     Verdict::Pending
                 }
             }
             Self::NoDisplay => {
-                if log.contains(markers::PANIC) {
-                    Verdict::Fail("kernel panicked".into())
+                if log.contains(markers::PANIC) || log.contains(markers::CPU_EXCEPTION) {
+                    Verdict::Fail("kernel panicked or took a CPU exception".into())
                 } else if log.contains(markers::BOOT_OK) {
                     Verdict::Fail("BOOT OK without a display adapter; expected degraded".into())
                 } else if log.contains(markers::BOOT_DEGRADED) {
-                    if log.contains(markers::GRAPHICS_UNAVAILABLE) {
-                        Verdict::Pass
-                    } else {
+                    if !log.contains(markers::GRAPHICS_UNAVAILABLE) {
                         Verdict::Fail("degraded, but no graphics-unavailable report".into())
+                    } else if !log.contains(markers::MEMORY_SELFTEST_PASS) {
+                        Verdict::Fail("memory self-test did not pass without a display".into())
+                    } else {
+                        Verdict::Pass
                     }
                 } else {
                     Verdict::Pending
@@ -95,30 +136,106 @@ impl Scenario {
                 if log.contains(markers::BOOT_OK) || log.contains(markers::BOOT_DEGRADED) {
                     return Verdict::Fail("kernel finished booting instead of panicking".into());
                 }
-                let Some(start) = log.find(markers::PANIC) else {
+                let Some(report) = complete_panic_report(log) else {
                     return Verdict::Pending;
                 };
-                let report = &log[start..];
-                if !report.contains(markers::PANIC_HALTED) {
+                require(
+                    report,
+                    &[
+                        (markers::DELIBERATE_PANIC_MESSAGE, "panic message"),
+                        (markers::PANIC_LOCATION, "location line"),
+                        ("kernel", "kernel source path"),
+                        (markers::PANIC_BANNER_DRAWN, "on-screen banner"),
+                    ],
+                )
+            }
+            Self::PageFault | Self::StackOverflow => {
+                if log.contains(markers::BOOT_OK) || log.contains(markers::BOOT_DEGRADED) {
+                    return Verdict::Fail("kernel finished booting instead of faulting".into());
+                }
+                let Some(report) = complete_panic_report(log) else {
                     return Verdict::Pending;
+                };
+                if !log.contains(markers::MEMORY_SELFTEST_PASS) {
+                    return Verdict::Fail(
+                        "fault happened before the memory self-test passed".into(),
+                    );
                 }
-                let missing: Vec<&str> = [
-                    (markers::DELIBERATE_PANIC_MESSAGE, "panic message"),
-                    (markers::PANIC_LOCATION, "location line"),
-                    ("kernel", "kernel source path"),
-                    (markers::PANIC_BANNER_DRAWN, "on-screen banner"),
-                ]
-                .into_iter()
-                .filter(|(needle, _)| !report.contains(needle))
-                .map(|(_, what)| what)
-                .collect();
-                if missing.is_empty() {
-                    Verdict::Pass
+                let Some(start) = log.find(markers::CPU_EXCEPTION) else {
+                    return Verdict::Fail("panic without a CPU exception report".into());
+                };
+                let exception = &log[start..];
+                let expected: &[(&str, &str)] = if self == Self::PageFault {
+                    &[
+                        ("page fault (#PF)", "page-fault report"),
+                        ("page not present, write, kernel mode", "decoded error code"),
+                        (markers::FAULT_ADDRESS, "faulting address"),
+                        (markers::DOUBLE_FAULT_STACK_GUARD, "guard-page diagnosis"),
+                    ]
                 } else {
-                    Verdict::Fail(format!("panic report lacks: {}", missing.join(", ")))
+                    &[
+                        ("double fault (#DF)", "double-fault report"),
+                        (markers::FAULT_ADDRESS, "faulting address"),
+                        (markers::BOOT_STACK_GUARD, "boot-stack guard diagnosis"),
+                    ]
+                };
+                match require(exception, expected) {
+                    Verdict::Pass => {}
+                    other => return other,
                 }
+                if self == Self::PageFault && !fault_address_matches(log) {
+                    return Verdict::Fail("reported CR2 differs from the address written".into());
+                }
+                require(
+                    report,
+                    &[
+                        ("unrecoverable CPU exception", "panic message"),
+                        (markers::PANIC_BANNER_DRAWN, "on-screen banner"),
+                    ],
+                )
             }
         }
+    }
+}
+
+/// The text from the panic marker on, once the report is complete.
+fn complete_panic_report(log: &str) -> Option<&str> {
+    let start = log.find(markers::PANIC)?;
+    let report = &log[start..];
+    report.contains(markers::PANIC_HALTED).then_some(report)
+}
+
+/// Pass if `text` contains every needle, else name what is missing.
+fn require(text: &str, needles: &[(&str, &str)]) -> Verdict {
+    let missing: Vec<&str> = needles
+        .iter()
+        .filter(|(needle, _)| !text.contains(needle))
+        .map(|(_, what)| *what)
+        .collect();
+    if missing.is_empty() {
+        Verdict::Pass
+    } else {
+        Verdict::Fail(format!("report lacks: {}", missing.join(", ")))
+    }
+}
+
+/// First hexadecimal number after `prefix` on a line starting with it.
+fn hex_after(log: &str, prefix: &str) -> Option<u64> {
+    let line = log.lines().find(|l| l.starts_with(prefix))?;
+    let rest = &line[prefix.len()..];
+    let hex = rest.split("0x").nth(1)?;
+    let digits: String = hex.chars().take_while(char::is_ascii_hexdigit).collect();
+    u64::from_str_radix(&digits, 16).ok()
+}
+
+/// The deliberate write's target equals the CR2 in the exception report.
+fn fault_address_matches(log: &str) -> bool {
+    match (
+        hex_after(log, markers::DELIBERATE_FAULT),
+        hex_after(log, markers::FAULT_ADDRESS),
+    ) {
+        (Some(target), Some(cr2)) => target == cr2,
+        _ => false,
     }
 }
 
@@ -269,7 +386,7 @@ fn check_screen(scenario: Scenario, image: &RgbImage, log: &str) -> Result<(), S
     expect_count(theme::CARD, 10_000, "card")?;
     expect_count(theme::TITLE, 200, "title text")?;
     expect_count(theme::OK, 100, "status dot")?;
-    if scenario == Scenario::Panic {
+    if scenario.expects_banner() {
         expect_pixel(1, height - 1, theme::PANIC_BG, "panic banner")?;
         expect_count(theme::PANIC_TEXT, 200, "panic text")?;
     }
@@ -435,7 +552,10 @@ mod tests {
     fn boot_scenario_verdicts() {
         assert_eq!(Scenario::Boot.judge(""), Verdict::Pending);
         assert_eq!(
-            Scenario::Boot.judge(&format!("{ENTERED}[rust-os] BOOT OK: done\n")),
+            Scenario::Boot.judge(&format!(
+                "{ENTERED}{} (5 checks)\n[rust-os] BOOT OK: done\n",
+                markers::MEMORY_SELFTEST_PASS
+            )),
             Verdict::Pass
         );
         assert!(matches!(
@@ -471,10 +591,99 @@ mod tests {
     }
 
     #[test]
+    fn boot_scenario_requires_memory_self_test() {
+        let no_selftest = format!("{ENTERED}{}: done\n", markers::BOOT_OK);
+        assert!(matches!(
+            Scenario::Boot.judge(&no_selftest),
+            Verdict::Fail(_)
+        ));
+        let failed = format!("{ENTERED}{} 1 of 2\n", markers::MEMORY_SELFTEST_FAIL);
+        assert!(matches!(Scenario::Boot.judge(&failed), Verdict::Fail(_)));
+        let exception = format!(
+            "{ENTERED}{} (2 checks)\n{} page fault\n",
+            markers::MEMORY_SELFTEST_PASS,
+            markers::CPU_EXCEPTION
+        );
+        assert!(matches!(Scenario::Boot.judge(&exception), Verdict::Fail(_)));
+    }
+
+    fn fault_log(exception: &str, details: &str) -> String {
+        format!(
+            "{ENTERED}{pass} (9 checks)\n{deliberate} write to 0xffff804000000010\n\
+             {exc} {exception}\n{details}\n{panic}\n\
+             [rust-os]   message: unrecoverable CPU exception: x\n{banner}\n{halted}\n",
+            pass = markers::MEMORY_SELFTEST_PASS,
+            deliberate = markers::DELIBERATE_FAULT,
+            exc = markers::CPU_EXCEPTION,
+            panic = markers::PANIC,
+            banner = markers::PANIC_BANNER_DRAWN,
+            halted = markers::PANIC_HALTED,
+        )
+    }
+
+    #[test]
+    fn page_fault_scenario_checks_report_and_address() {
+        let details = format!(
+            "[rust-os]   cause: page not present, write, kernel mode\n{} 0xffff804000000010\n{} {}",
+            markers::FAULT_ADDRESS,
+            markers::FAULT_DIAGNOSIS,
+            markers::DOUBLE_FAULT_STACK_GUARD
+        );
+        let good = fault_log("page fault (#PF), vector 14", &details);
+        assert_eq!(Scenario::PageFault.judge(&good), Verdict::Pass);
+        let wrong_address = good.replace(
+            "0xffff804000000010\n[rust-os]   diag",
+            "0xffff804000000018\n[rust-os]   diag",
+        );
+        assert!(matches!(
+            Scenario::PageFault.judge(&wrong_address),
+            Verdict::Fail(_)
+        ));
+        let no_diagnosis = good.replace(markers::DOUBLE_FAULT_STACK_GUARD, "nothing known");
+        assert!(matches!(
+            Scenario::PageFault.judge(&no_diagnosis),
+            Verdict::Fail(_)
+        ));
+        // A double fault is not what this scenario expects.
+        assert!(matches!(
+            Scenario::StackOverflow.judge(&good),
+            Verdict::Fail(_)
+        ));
+        // Incomplete report: still pending.
+        let partial = good.split(markers::PANIC_HALTED).next().unwrap().to_owned();
+        assert_eq!(Scenario::PageFault.judge(&partial), Verdict::Pending);
+    }
+
+    #[test]
+    fn stack_overflow_scenario_needs_double_fault_on_boot_stack_guard() {
+        let details = format!(
+            "{} 0xffff800000000ff8\n{} {}",
+            markers::FAULT_ADDRESS,
+            markers::FAULT_DIAGNOSIS,
+            markers::BOOT_STACK_GUARD
+        );
+        let good = fault_log("double fault (#DF), vector 8", &details);
+        assert_eq!(Scenario::StackOverflow.judge(&good), Verdict::Pass);
+        let other_guard = good.replace(markers::BOOT_STACK_GUARD, "no known guard page involved");
+        assert!(matches!(
+            Scenario::StackOverflow.judge(&other_guard),
+            Verdict::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn hex_parsing() {
+        assert_eq!(hex_after("ab 0x1f zz\n", "ab"), Some(0x1f));
+        assert_eq!(hex_after("x\nab: 0x00ff\n", "ab:"), Some(0xff));
+        assert_eq!(hex_after("ab nothing\n", "ab"), None);
+    }
+
+    #[test]
     fn no_display_scenario_requires_degraded_graphics() {
         let ok = format!(
-            "{ENTERED}{} no framebuffer\n{}: x\n",
+            "{ENTERED}{} no framebuffer\n{} (3 checks)\n{}: x\n",
             markers::GRAPHICS_UNAVAILABLE,
+            markers::MEMORY_SELFTEST_PASS,
             markers::BOOT_DEGRADED
         );
         assert_eq!(Scenario::NoDisplay.judge(&ok), Verdict::Pass);

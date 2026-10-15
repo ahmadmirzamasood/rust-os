@@ -5,6 +5,7 @@ members = [
     "crates/os-abi",
     "crates/gfx",
     "crates/boot-data",
+    "crates/mm",
     "userspace/desktop",
     "xtask",
     "tools/image-builder",
@@ -15,6 +16,7 @@ default-members = [
     "crates/os-abi",
     "crates/gfx",
     "crates/boot-data",
+    "crates/mm",
     "userspace/desktop",
     "xtask",
 ]
@@ -30,6 +32,7 @@ rust-version = "1.101"
 os-abi = { path = "crates/os-abi" }
 gfx = { path = "crates/gfx" }
 boot-data = { path = "crates/boot-data" }
+mm = { path = "crates/mm" }
 # Bitmap glyphs rasterized from Noto Sans Mono. Already compiled into the
 # bootloader's UEFI stage; only the sizes and weights we draw are enabled.
 noto-sans-mono-bitmap = { version = "=0.2.0", default-features = false, features = [

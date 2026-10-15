@@ -22,12 +22,12 @@ newer. The kernel itself uses no nightly features.
 
 | Command | What it does | Status |
 | --- | --- | --- |
-| `cargo xtask lint` | `cargo fmt --all --check`; clippy on host crates (`--all-targets`); clippy on the kernel for `x86_64-unknown-none`, with and without the `deliberate-panic` feature; warnings are errors | Verified (Windows) |
-| `cargo xtask test` | `cargo test` on host-testable crates (`os-abi`, `gfx`, `boot-data`, `desktop`, `xtask`) | Verified (Windows) |
+| `cargo xtask lint` | `cargo fmt --all --check`; clippy on host crates (`--all-targets`); clippy on the kernel for `x86_64-unknown-none`, normal and with each fault-test feature (`deliberate-panic`, `deliberate-page-fault`, `deliberate-stack-overflow`); warnings are errors | Verified (Windows) |
+| `cargo xtask test` | `cargo test` on host-testable crates (`os-abi`, `gfx`, `boot-data`, `mm`, `desktop`, `xtask`) | Verified (Windows) |
 | `cargo xtask build [--release]` | Builds `target/x86_64-unknown-none/<profile>/kernel` (ELF) | Verified (Windows) |
 | `cargo xtask image [--release]` | Builds the kernel, then `tools/image-builder` writes `target/images/<profile>/rust-os-uefi.img` | Verified (Windows, including from an empty `target/`) |
 | `cargo xtask run [--ovmf-code <file>] [--ovmf-vars <file>] [--timeout <secs>] [--headless]` | Builds the image and starts QEMU with a display window and the serial port on stdio | Verified (Windows, QEMU 11.1.0) |
-| `cargo xtask smoke [--scenario boot\|panic\|no-display\|all] [--timeout <secs>] [--release]` | Automated boot test in headless QEMU; see below | Verified (Windows, QEMU 11.1.0, debug and release) |
+| `cargo xtask smoke [--scenario boot\|panic\|no-display\|page-fault\|stack-overflow\|all] [--timeout <secs>] [--release]` | Automated boot test in headless QEMU; see below | Verified (Windows, QEMU 11.1.0, debug and release) |
 | `cargo xtask check-private` | Fails if private paths are tracked or staged, or if `.agent-private/` is not ignored | Verified (Windows) |
 | `cargo xtask ci` | `lint` + `test` + `build` + `check-private` (no QEMU needed) | Verified (Windows) |
 
@@ -60,20 +60,35 @@ Every step logs a `[rust-os]` line on COM1 (115200 8N1):
 1. Masks interrupts (no IDT exists yet) and initializes the 16550 UART,
    checking it with a loopback byte. Waits on the UART are bounded; without a
    UART, output is dropped instead of hanging.
-2. Checks the bootloader API version, then copies the memory map into
+2. Installs its own GDT, TSS and IDT: every CPU exception is reported, and
+   double faults run on a separate stack so a stack overflow is reported
+   too.
+3. Checks the bootloader API version, then copies the memory map into
    kernel-owned storage, sorts it and validates it (non-empty, no inverted or
    overlapping ranges, page-aligned usable regions, some usable memory).
-3. Takes the framebuffer out of the boot information and validates width,
+4. Takes the framebuffer out of the boot information and validates width,
    height, stride, bytes per pixel and pixel format against the buffer
    length. Drawing is clipped and never writes stride padding.
-4. Draws the welcome screen and prints `[rust-os] BOOT OK`. If any stage
+5. Sets up memory management: checks NX and write protection (and enables
+   SMEP/SMAP when the CPU has them). It builds the frame allocator from the
+   memory map and withdraws every frame the live boot page tables use. It
+   then claims its own region of the address space, maps the heap and a
+   guarded double-fault stack, and prints `[rust-os] memory ready:`. See
+   [architecture/memory.md](architecture/memory.md).
+6. Runs the memory self-test (frames, mappings, real faults on guard,
+   read-only and no-execute pages, heap stress, exhaustion) and prints
+   `[rust-os] MEMORY SELF-TEST PASS (<n> checks)`.
+7. Draws the welcome screen and prints `[rust-os] BOOT OK`. If any stage
    failed, the screen and log say so and the final line is
    `[rust-os] BOOT DEGRADED`. Without a framebuffer, serial output continues.
-5. Halts the CPU (`cli; hlt` loop).
+8. Halts the CPU (`cli; hlt` loop).
 
 On a panic the kernel prints `[rust-os] KERNEL PANIC` with the source
 location and message, draws a red banner if the framebuffer is usable, and
-halts. It never allocates or waits on a lock while doing so.
+halts. It never allocates or waits on a lock while doing so. A fatal CPU
+exception first prints `[rust-os] CPU EXCEPTION:` with the decoded cause,
+the faulting address (CR2), the registers and the guard page involved (if
+any), then panics the same way.
 
 ## Boot smoke test
 
@@ -85,15 +100,24 @@ per scenario, measured from QEMU start).
 
 | Scenario | Image | Passes when |
 | --- | --- | --- |
-| `boot` | Normal | Serial has `[rust-os] BOOT OK` and no panic; a QMP screendump matches the kernel's reported resolution, the background colour at (1,1) is exact (catches RGB/BGR swaps), and title text, card and status dots are present |
-| `panic` | Kernel built with the `deliberate-panic` feature (separate target dir and image) | Serial has the full panic report: message, location, "banner drawn", "CPU halted"; the screendump shows the red banner over the welcome screen |
-| `no-display` | Normal, QEMU with `-vga none` | No framebuffer is provided; serial reports `graphics unavailable` and ends with `[rust-os] BOOT DEGRADED` |
+| `boot` | Normal | Serial has the memory self-test pass marker and `[rust-os] BOOT OK`, and no panic or CPU exception; a QMP screendump matches the kernel's reported resolution, the background colour at (1,1) is exact (catches RGB/BGR swaps), and title text, card and status dots are present |
+| `panic` | Kernel built with the `deliberate-panic` feature | Serial has the full panic report: message, location, "banner drawn", "CPU halted"; the screendump shows the red banner over the welcome screen |
+| `no-display` | Normal, QEMU with `-vga none` | No framebuffer is provided; serial reports `graphics unavailable`, the memory self-test still passes, and the log ends with `[rust-os] BOOT DEGRADED` |
+| `page-fault` | Kernel built with `deliberate-page-fault` | After the self-test passes, the kernel writes into the unmapped guard page below its double-fault stack. Serial must report a page fault with cause "page not present, write, kernel mode", a CR2 equal to the written address, and that guard page as the diagnosis, followed by the full panic report; the screendump shows the banner |
+| `stack-overflow` | Kernel built with `deliberate-stack-overflow` | After the self-test passes, the kernel recurses until the boot stack hits its guard page. Serial must report a double fault (handled on its own stack) diagnosed as the boot stack's guard page, followed by the full panic report; the screendump shows the banner |
+
+Every scenario fails as soon as the log shows a memory self-test failure or a
+memory initialization failure. A guest that triple-faults does not exit,
+because QEMU runs with `-no-reboot -no-shutdown`; it shows up as the
+timeout.
 
 Output per scenario goes to `target/smoke/<profile>/<scenario>/`:
 `serial.log` and, where the scenario draws, `screen.png`.
 
-The `deliberate-panic` feature exists only for this test. Never ship an image
-built with it.
+Fault-test kernels are built into `target/fault-tests/<feature>/` and their
+images are named `rust-os-uefi-<feature>.img`, so they never replace the
+normal kernel or image. The `deliberate-*` features exist only for these
+tests. Never ship an image built with one.
 
 ## Continuous integration
 
@@ -103,8 +127,9 @@ to `master`, every pull request, and on demand:
 - **check** (Ubuntu and Windows): `cargo xtask ci`.
 - **boot-smoke** (Ubuntu): lints `image-builder`, then runs
   `cargo xtask smoke` (all scenarios) with the distribution's QEMU and OVMF.
-  This job definition has not yet run on GitHub; until it does, only the
-  Windows results above are verified.
+  It has passed on GitHub for the `boot`, `panic` and `no-display`
+  scenarios. The `page-fault` and `stack-overflow` scenarios and the memory
+  self-test have so far been verified only on the Windows host above.
 
 Actions are pinned to commit SHAs; the toolchain comes from
 `rust-toolchain.toml`.

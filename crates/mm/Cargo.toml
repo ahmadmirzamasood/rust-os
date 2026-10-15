@@ -1,0 +1,13 @@
+[package]
+name = "mm"
+description = "no_std memory-management core: typed addresses, frame bitmap, x86_64 page-table mapper and a reclaiming free-list heap. Host-tested."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

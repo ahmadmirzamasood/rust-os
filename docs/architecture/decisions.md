@@ -114,3 +114,63 @@ bugs that serial output cannot. Rejected for now: QEMU `isa-debug-exit`
 **Cost:** the panic scenario boots a different kernel build than the normal
 one. Screenshots depend on QEMU's display device; other VMs need their own
 evidence.
+
+## ADR-011 — Kernel-owned CPU tables and recoverable probes
+
+**Decision:** the kernel installs its own GDT (code, data, TSS), a TSS
+whose IST slot 1 serves double faults, and an IDT covering the 32 exception
+vectors. Each vector has a `global_asm` entry stub that saves all registers
+and calls one Rust dispatcher. Fatal exceptions are reported on serial and
+then panic. Faults raised by three small probe routines (read, write, call)
+are recovered, so self-tests can prove that guard, read-only and
+no-execute pages really fault. All project-owned assembly remains under
+`kernel/src/arch/x86_64/` (this supersedes the single-file rule of
+ADR-009).
+
+**Why:** without a TSS, a stack overflow escalates to a double fault on the
+same exhausted stack and resets the machine silently. Hand-written stubs
+avoid the unstable `x86-interrupt` ABI and keep the register frame
+explicit. Recoverable probes are the only way to test real fault behaviour
+in the running kernel without a separate image per check.
+
+**Cost:** about 60 lines of assembly, documented in place. An `asm!`
+register-allocation bug in segment reloading (a `lateout` scratch register
+that could share an input's register) only showed up in release builds.
+The smoke test now runs in both profiles before a change is accepted.
+
+## ADR-012 — Memory management design
+
+**Decision:**
+
+- **Physical access:** ask the bootloader for a full physical-memory
+  window. Only `kernel/src/memory/phys.rs` turns physical addresses into
+  pointers, for page tables and owned frames.
+- **Frames:** a bitmap with separate *managed* and *free* bits.
+  Reservations come from walking the live page tables at boot (every table
+  frame and every frame a boot mapping points to), not from a hand-kept list
+  of what the bootloader might use.
+- **Kernel mappings:** the kernel claims one unused PML4 slot and never
+  edits bootloader mappings. Inside it are the heap, guarded stacks and
+  self-test scratch space. A mapper generic over table access enforces W^X
+  and no-replace, and returns a must-use TLB flush token.
+- **Heap:** a first-fit, address-ordered free list with coalescing. It has
+  16-byte granularity, grows on demand by mapping pages, and refuses growth
+  up front when frames or address space would not suffice.
+- Bookkeeping lives in the host-tested `mm` crate. The kernel adds the
+  machine-facing parts and an on-boot self-test.
+
+**Why:** walking the live tables catches memory the firmware map wrongly
+calls usable. In QEMU it found the bootloader's still-mapped trampoline
+frames. A private PML4 slot makes ownership trivially checkable. A free
+list is small, reclaims memory, and its invariants can be checked
+mechanically.
+
+**Rejected for now:** the `x86_64` crate (larger unsafe surface than the
+few structures needed, see ADR-009). The `linked_list_allocator` crate
+(same algorithm class; own code keeps alignment and failure rules
+documented and tested here). A recursive page-table mapping (more address
+arithmetic, and still needs physical access for new frames).
+
+**Cost:** bootloader-owned memory is never reclaimed; the heap never
+shrinks; only 4 KiB pages are created. See
+[memory.md](memory.md#known-limitations).

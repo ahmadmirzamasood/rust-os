@@ -5,11 +5,13 @@ graphical desktop: Computer, Files and Trash icons, a taskbar, basic window
 management, file browsing, and shutdown/restart. The look aims for the
 clarity of GNOME and Pantheon without using their code or branding.
 
-**Status: first bootable kernel.** There is no usable OS yet. In QEMU with
-UEFI firmware the kernel boots, logs each boot stage on the serial port,
-validates the boot information, draws a welcome screen with the project name
-and boot status, and halts. There is no input, interrupt handling, memory
-allocator, file system or desktop yet.
+**Status: kernel with memory management.** There is no usable OS yet. In
+QEMU with UEFI firmware the kernel boots and logs each boot stage on the
+serial port. It installs CPU exception handling and validates the boot
+information. It then sets up physical-frame allocation, kernel page mappings
+with guard pages and W^X, and a reclaiming heap, and checks all of it with an
+on-boot self-test. Finally it draws a welcome screen and halts. There is no
+input, interrupt-driven I/O, scheduler, file system or desktop yet.
 
 | Area | State |
 | --- | --- |
@@ -17,7 +19,9 @@ allocator, file system or desktop yet.
 | Kernel boot (serial log, boot-info checks, welcome screen, panic report) | Verified in QEMU 11.1.0 + bundled edk2 on Windows by `cargo xtask smoke` |
 | UEFI disk image | Builds from a fresh checkout; boots in QEMU 11.1.0 |
 | QEMU launch (`cargo xtask run`) | Verified on Windows with QEMU 11.1.0 and its bundled edk2 firmware |
-| Interrupts, memory management, input | Not started |
+| CPU exceptions (GDT/TSS/IDT, double-fault stack, fault reports) | Verified in QEMU (Windows host): deliberate page fault and stack overflow are reported by `cargo xtask smoke` |
+| Memory management (frames, kernel mappings, guard pages, W^X, heap) | Verified in QEMU (Windows host): on-boot self-test passes in debug and release; see [docs/architecture/memory.md](docs/architecture/memory.md) |
+| External interrupts, timer, input | Not started |
 | Desktop, Files, Trash, window manager | Not started (only a host-tested model) |
 | Shutdown / restart | Not started |
 | Sleep | Deliberately unavailable until real suspend/resume exists |
@@ -62,6 +66,7 @@ kernel/              no_std kernel binary (x86_64-unknown-none)
 crates/os-abi/       no_std interface shared by kernel and user space
 crates/gfx/          no_std framebuffer drawing, bitmap text, boot screens (host-tested)
 crates/boot-data/    no_std boot-info validation and serial boot markers (host-tested)
+crates/mm/           no_std frame allocator, page-table mapper, heap (host-tested)
 userspace/desktop/   no_std desktop shell model (host-tested)
 xtask/               host build tool: lint, test, build, image, run, smoke
 tools/image-builder/ host tool wrapping the kernel into a UEFI disk image
@@ -69,6 +74,7 @@ docs/                public architecture and build documentation
 ```
 
 Architecture: [docs/architecture/overview.md](docs/architecture/overview.md).
+Memory management: [docs/architecture/memory.md](docs/architecture/memory.md).
 Decisions: [docs/architecture/decisions.md](docs/architecture/decisions.md).
 
 ## Rust boundary

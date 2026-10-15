@@ -12,9 +12,9 @@ processes without being rewritten.
 UEFI firmware (OVMF, external)
   └─ bootloader 0.11 UEFI stage (third-party Rust)
        └─ kernel                                   kernel/
-            ├─ arch: port I/O, cli/hlt                kernel/src/arch/ (interrupts, paging planned)
+            ├─ arch: port I/O, CPU tables, exceptions  kernel/src/arch/x86_64/
             ├─ boot info: validate, copy memory map   crates/boot-data/ + kernel/src/main.rs
-            ├─ memory: frames, mapping, heap          (planned)
+            ├─ memory: frames, mapping, stacks, heap  crates/mm/ + kernel/src/memory/
             ├─ drivers: 16550 serial (COM1)           kernel/src/serial.rs (input, block planned)
             ├─ graphics: framebuffer, drawing, text   crates/gfx/ + kernel/src/display.rs
             ├─ vfs + filesystems                      (planned)
@@ -33,16 +33,18 @@ Rules that keep the later split possible:
   can cross a system-call boundary.
 - Shared logic is `no_std` and host-testable; hardware access stays in narrow,
   documented `unsafe` wrappers inside the kernel.
-- Interrupt handlers only capture bounded data and enqueue events.
+- Interrupt handlers only capture bounded data and enqueue events. CPU
+  exception handlers never allocate or wait on locks.
 
 ## Workspace
 
 | Crate | Kind | Target | Purpose |
 | --- | --- | --- | --- |
-| `kernel` | bin, `no_std`, `no_main` | `x86_64-unknown-none` | Entry, serial driver, boot-info checks, framebuffer ownership, panic handler |
+| `kernel` | bin, `no_std`, `no_main` | `x86_64-unknown-none` | Entry, CPU tables and exception reports, memory management and its self-test, serial driver, boot-info checks, framebuffer ownership, panic handler |
 | `os-abi` | lib, `no_std` | any | Kernel ↔ user-space interface (power-action availability today) |
 | `gfx` | lib, `no_std`, no `unsafe` | any | Framebuffer layout validation, clipped drawing, bitmap text, boot screens |
 | `boot-data` | lib, `no_std`, no `unsafe` | any | Memory-map validation and copy; serial boot markers shared with `xtask smoke` |
+| `mm` | lib, `no_std`, `unsafe` only in the heap | any | Typed addresses, frame bitmap, page-table mapper (generic over table access), reclaiming free-list heap; see [memory.md](memory.md) |
 | `desktop` | lib, `no_std` | any | Desktop model: Computer/Files/Trash icons, power menu |
 | `xtask` | bin, `std` | host | Build orchestration and repository checks |
 | `image-builder` | bin, `std` | host | Wraps the kernel ELF into a UEFI disk image |

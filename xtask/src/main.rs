@@ -12,7 +12,13 @@ use smoke::Scenario;
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const IMAGE_NAME: &str = "rust-os-uefi.img";
-const PANIC_TEST_IMAGE_NAME: &str = "rust-os-uefi-panic-test.img";
+/// Kernel features that turn the kernel into a fault-test build. Each is
+/// built into its own target directory and image, never the normal ones.
+const FAULT_TEST_FEATURES: [&str; 3] = [
+    "deliberate-panic",
+    "deliberate-page-fault",
+    "deliberate-stack-overflow",
+];
 /// Default per-scenario limit for `smoke`, measured from QEMU start.
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -52,7 +58,8 @@ options:
   --timeout <secs>          run: stop QEMU after this long (default: none)
                             smoke: per-scenario limit (default: 120)
   --headless                run: no display window
-  --scenario <name>         smoke: boot, panic, no-display or all (default: all)
+  --scenario <name>         smoke: boot, panic, no-display, page-fault,
+                            stack-overflow or all (default: all)
 
 QEMU is `qemu-system-x86_64` from PATH, or RUST_OS_QEMU.
 ";
@@ -158,12 +165,32 @@ impl Options {
 }
 
 /// Which kernel build to produce.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum KernelVariant {
     Normal,
-    /// Built with the `deliberate-panic` feature into its own target
-    /// directory, so it never replaces the normal kernel or image.
-    DeliberatePanic,
+    /// Built with one of [`FAULT_TEST_FEATURES`] into its own target
+    /// directory (`target/fault-tests/<feature>`) and image, so it never
+    /// replaces the normal kernel or image.
+    FaultTest(&'static str),
+}
+
+impl KernelVariant {
+    fn target_dir(self) -> PathBuf {
+        match self {
+            Self::Normal => workspace_root().join("target"),
+            Self::FaultTest(feature) => workspace_root()
+                .join("target")
+                .join("fault-tests")
+                .join(feature),
+        }
+    }
+
+    fn image_name(self) -> String {
+        match self {
+            Self::Normal => IMAGE_NAME.to_owned(),
+            Self::FaultTest(feature) => format!("rust-os-uefi-{feature}.img"),
+        }
+    }
 }
 
 fn workspace_root() -> PathBuf {
@@ -201,7 +228,8 @@ fn lint() -> Result<(), String> {
     host.args(["clippy", "--all-targets", "--", "-D", "warnings"]);
     status(host)?;
 
-    for features in [None, Some("deliberate-panic")] {
+    let variants = std::iter::once(None).chain(FAULT_TEST_FEATURES.map(Some));
+    for features in variants {
         let mut kernel = cargo();
         kernel.args(["clippy", "--package", "kernel", "--target", KERNEL_TARGET]);
         if let Some(features) = features {
@@ -220,14 +248,11 @@ fn test() -> Result<(), String> {
 }
 
 fn build_kernel(options: &Options, variant: KernelVariant) -> Result<PathBuf, String> {
-    let target_dir = match variant {
-        KernelVariant::Normal => workspace_root().join("target"),
-        KernelVariant::DeliberatePanic => workspace_root().join("target").join("panic-test"),
-    };
+    let target_dir = variant.target_dir();
     let mut cmd = cargo();
     cmd.args(["build", "--package", "kernel", "--target", KERNEL_TARGET]);
-    if variant == KernelVariant::DeliberatePanic {
-        cmd.args(["--features", "deliberate-panic"]);
+    if let KernelVariant::FaultTest(feature) = variant {
+        cmd.args(["--features", feature]);
         cmd.arg("--target-dir").arg(&target_dir);
     }
     if options.release {
@@ -248,15 +273,11 @@ fn build_kernel(options: &Options, variant: KernelVariant) -> Result<PathBuf, St
 
 fn build_image(options: &Options, variant: KernelVariant) -> Result<PathBuf, String> {
     let kernel = build_kernel(options, variant)?;
-    let name = match variant {
-        KernelVariant::Normal => IMAGE_NAME,
-        KernelVariant::DeliberatePanic => PANIC_TEST_IMAGE_NAME,
-    };
     let image = workspace_root()
         .join("target")
         .join("images")
         .join(options.profile_dir())
-        .join(name);
+        .join(variant.image_name());
     let mut cmd = cargo();
     cmd.args(["run", "--release", "--package", "image-builder", "--"]);
     cmd.arg(&kernel).arg(&image);
@@ -318,27 +339,24 @@ fn smoke(options: &Options) -> Result<(), String> {
 
     // Build every needed image first so build time never counts against the
     // boot timeout.
-    let mut normal = None;
-    let mut panic = None;
-    for scenario in &scenarios {
-        if scenario.needs_panic_kernel() {
-            if panic.is_none() {
-                panic = Some(build_image(options, KernelVariant::DeliberatePanic)?);
-            }
-        } else if normal.is_none() {
-            normal = Some(build_image(options, KernelVariant::Normal)?);
+    let variant = |scenario: Scenario| match scenario.kernel_feature() {
+        Some(feature) => KernelVariant::FaultTest(feature),
+        None => KernelVariant::Normal,
+    };
+    let mut images = std::collections::HashMap::new();
+    for &scenario in &scenarios {
+        let variant = variant(scenario);
+        if let std::collections::hash_map::Entry::Vacant(slot) = images.entry(variant) {
+            slot.insert(build_image(options, variant)?);
         }
     }
 
     let mut passed = Vec::new();
     let mut failed = Vec::new();
     for scenario in scenarios {
-        let image = if scenario.needs_panic_kernel() {
-            panic.as_deref()
-        } else {
-            normal.as_deref()
-        }
-        .ok_or("image was not built")?;
+        let image = images
+            .get(&variant(scenario))
+            .ok_or("image was not built")?;
         match smoke::run(scenario, image, &setup) {
             Ok(summary) => passed.push(summary),
             Err(err) => {

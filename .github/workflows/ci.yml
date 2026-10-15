@@ -45,9 +45,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
       - name: Lint image builder
         run: cargo clippy -p image-builder -- -D warnings
-      - name: Boot smoke test (boot, panic, no-display)
-        # Builds both images, boots each scenario headless and fails unless
-        # the kernel's serial success marker (and screenshot check) appear
+      - name: Boot smoke test (boot, panic, no-display, page-fault, stack-overflow)
+        # Builds the normal image and one image per fault-test feature, boots
+        # each scenario headless and fails unless the kernel's serial markers
+        # (memory self-test, fault reports) and the screenshot check succeed
         # within the per-scenario timeout. OVMF is auto-detected.
         run: cargo xtask smoke
       - name: Show serial logs
