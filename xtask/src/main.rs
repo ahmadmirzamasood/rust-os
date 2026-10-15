@@ -1,12 +1,20 @@
 //! Project build tool. Run `cargo xtask help`.
 
-use std::ffi::OsString;
+mod picture;
+mod qemu;
+mod smoke;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
+use smoke::Scenario;
+
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const IMAGE_NAME: &str = "rust-os-uefi.img";
+const PANIC_TEST_IMAGE_NAME: &str = "rust-os-uefi-panic-test.img";
+/// Default per-scenario limit for `smoke`, measured from QEMU start.
+const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Path prefixes that must never be tracked or staged in the public repository.
 const PRIVATE_PREFIXES: &[&str] = &[
@@ -31,17 +39,22 @@ commands:
   test            host unit tests for the default workspace members
   build           build the kernel ELF for x86_64-unknown-none
   image           build the kernel and a UEFI GPT disk image (network on first run)
-  run             build the image and launch it in QEMU (NOT yet verified)
+  run             build the image and boot it in QEMU (window + serial on stdio)
+  smoke           boot smoke test in headless QEMU: serial markers + screenshot check
   check-private   fail if private paths are tracked or staged in Git
-  ci              lint + test + build + check-private
+  ci              lint + test + build + check-private (no QEMU needed)
   help            show this message
 
 options:
   --release                 build the kernel with the release profile
-  --ovmf-code <path>        OVMF code firmware for `run` (or RUST_OS_OVMF_CODE)
-  --ovmf-vars <path>        OVMF variable store template for `run` (or RUST_OS_OVMF_VARS)
-  --timeout <secs>          stop QEMU after this many seconds (default: none)
-  --headless                run QEMU without a display window (CI)
+  --ovmf-code <path>        OVMF code firmware (or RUST_OS_OVMF_CODE; else auto-detected)
+  --ovmf-vars <path>        OVMF variable store template (or RUST_OS_OVMF_VARS)
+  --timeout <secs>          run: stop QEMU after this long (default: none)
+                            smoke: per-scenario limit (default: 120)
+  --headless                run: no display window
+  --scenario <name>         smoke: boot, panic, no-display or all (default: all)
+
+QEMU is `qemu-system-x86_64` from PATH, or RUST_OS_QEMU.
 ";
 
 fn main() -> ExitCode {
@@ -60,13 +73,14 @@ fn main() -> ExitCode {
     let result = match command.as_str() {
         "lint" => lint(),
         "test" => test(),
-        "build" => build_kernel(&options).map(drop),
-        "image" => build_image(&options).map(drop),
+        "build" => build_kernel(&options, KernelVariant::Normal).map(drop),
+        "image" => build_image(&options, KernelVariant::Normal).map(drop),
         "run" => run(&options),
+        "smoke" => smoke(&options),
         "check-private" => check_private(),
         "ci" => lint()
             .and_then(|()| test())
-            .and_then(|()| build_kernel(&options).map(drop))
+            .and_then(|()| build_kernel(&options, KernelVariant::Normal).map(drop))
             .and_then(|()| check_private()),
         "help" | "--help" | "-h" => {
             print!("{HELP}");
@@ -90,6 +104,7 @@ struct Options {
     ovmf_vars: Option<PathBuf>,
     timeout: Option<Duration>,
     headless: bool,
+    scenario: Option<String>,
 }
 
 impl Options {
@@ -102,11 +117,14 @@ impl Options {
                 "--headless" => options.headless = true,
                 "--ovmf-code" => options.ovmf_code = Some(value("--ovmf-code")?.into()),
                 "--ovmf-vars" => options.ovmf_vars = Some(value("--ovmf-vars")?.into()),
+                "--scenario" => options.scenario = Some(value("--scenario")?),
                 "--timeout" => {
                     let secs = value("--timeout")?;
                     let secs: u64 = secs
                         .parse()
-                        .map_err(|_| format!("invalid --timeout `{secs}`"))?;
+                        .ok()
+                        .filter(|&s| s > 0)
+                        .ok_or(format!("invalid --timeout `{secs}`"))?;
                     options.timeout = Some(Duration::from_secs(secs));
                 }
                 other => return Err(format!("unknown option `{other}`")),
@@ -124,6 +142,28 @@ impl Options {
     fn profile_dir(&self) -> &'static str {
         if self.release { "release" } else { "debug" }
     }
+
+    fn firmware(&self) -> Result<qemu::Firmware, String> {
+        let firmware = qemu::firmware(self.ovmf_code.as_deref(), self.ovmf_vars.as_deref())?;
+        let vars = firmware
+            .vars
+            .as_deref()
+            .map_or("none".into(), |v| v.display().to_string());
+        eprintln!(
+            "firmware: {} (vars template: {vars})",
+            firmware.code.display()
+        );
+        Ok(firmware)
+    }
+}
+
+/// Which kernel build to produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KernelVariant {
+    Normal,
+    /// Built with the `deliberate-panic` feature into its own target
+    /// directory, so it never replaces the normal kernel or image.
+    DeliberatePanic,
 }
 
 fn workspace_root() -> PathBuf {
@@ -161,18 +201,16 @@ fn lint() -> Result<(), String> {
     host.args(["clippy", "--all-targets", "--", "-D", "warnings"]);
     status(host)?;
 
-    let mut kernel = cargo();
-    kernel.args([
-        "clippy",
-        "--package",
-        "kernel",
-        "--target",
-        KERNEL_TARGET,
-        "--",
-        "-D",
-        "warnings",
-    ]);
-    status(kernel)
+    for features in [None, Some("deliberate-panic")] {
+        let mut kernel = cargo();
+        kernel.args(["clippy", "--package", "kernel", "--target", KERNEL_TARGET]);
+        if let Some(features) = features {
+            kernel.args(["--features", features]);
+        }
+        kernel.args(["--", "-D", "warnings"]);
+        status(kernel)?;
+    }
+    Ok(())
 }
 
 fn test() -> Result<(), String> {
@@ -181,15 +219,22 @@ fn test() -> Result<(), String> {
     status(cmd)
 }
 
-fn build_kernel(options: &Options) -> Result<PathBuf, String> {
+fn build_kernel(options: &Options, variant: KernelVariant) -> Result<PathBuf, String> {
+    let target_dir = match variant {
+        KernelVariant::Normal => workspace_root().join("target"),
+        KernelVariant::DeliberatePanic => workspace_root().join("target").join("panic-test"),
+    };
     let mut cmd = cargo();
     cmd.args(["build", "--package", "kernel", "--target", KERNEL_TARGET]);
+    if variant == KernelVariant::DeliberatePanic {
+        cmd.args(["--features", "deliberate-panic"]);
+        cmd.arg("--target-dir").arg(&target_dir);
+    }
     if options.release {
         cmd.arg("--release");
     }
     status(cmd)?;
-    let elf = workspace_root()
-        .join("target")
+    let elf = target_dir
         .join(KERNEL_TARGET)
         .join(options.profile_dir())
         .join("kernel");
@@ -201,13 +246,17 @@ fn build_kernel(options: &Options) -> Result<PathBuf, String> {
     }
 }
 
-fn build_image(options: &Options) -> Result<PathBuf, String> {
-    let kernel = build_kernel(options)?;
+fn build_image(options: &Options, variant: KernelVariant) -> Result<PathBuf, String> {
+    let kernel = build_kernel(options, variant)?;
+    let name = match variant {
+        KernelVariant::Normal => IMAGE_NAME,
+        KernelVariant::DeliberatePanic => PANIC_TEST_IMAGE_NAME,
+    };
     let image = workspace_root()
         .join("target")
         .join("images")
         .join(options.profile_dir())
-        .join(IMAGE_NAME);
+        .join(name);
     let mut cmd = cargo();
     cmd.args(["run", "--release", "--package", "image-builder", "--"]);
     cmd.arg(&kernel).arg(&image);
@@ -216,42 +265,21 @@ fn build_image(options: &Options) -> Result<PathBuf, String> {
 }
 
 fn run(options: &Options) -> Result<(), String> {
-    let ovmf_code = options.ovmf_code.as_ref().ok_or(
-        "QEMU needs UEFI firmware: pass --ovmf-code <OVMF_CODE.fd> or set RUST_OS_OVMF_CODE",
-    )?;
-    if !ovmf_code.is_file() {
-        return Err(format!(
-            "OVMF code firmware not found: {}",
-            ovmf_code.display()
-        ));
-    }
-    let image = build_image(options)?;
+    let firmware = options.firmware()?;
+    let qemu = qemu::program()?;
+    let image = build_image(options, KernelVariant::Normal)?;
+    let image_dir = image.parent().ok_or("image has no parent directory")?;
+    let vars = qemu::copy_vars(&firmware, image_dir)?;
 
-    let mut drives: Vec<OsString> = vec![pflash(ovmf_code, true)];
-    if let Some(vars_template) = &options.ovmf_vars {
-        // Copy the variable store so the guest never writes the template.
-        let vars = image.with_file_name("OVMF_VARS.fd");
-        std::fs::copy(vars_template, &vars)
-            .map_err(|err| format!("cannot copy OVMF vars {}: {err}", vars_template.display()))?;
-        drives.push(pflash(&vars, false));
-    }
-    let mut disk = OsString::from("format=raw,file=");
-    disk.push(&image);
-
-    let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-machine", "q35", "-m", "256M", "-serial", "stdio"]);
-    cmd.args(["-no-reboot", "-no-shutdown"]);
+    let mut cmd = qemu::base_command(&qemu, &firmware, vars.as_deref(), &image);
+    cmd.args(["-serial", "stdio"]);
     if options.headless {
         cmd.args(["-display", "none"]);
     }
-    for drive in drives {
-        cmd.arg("-drive").arg(drive);
-    }
-    cmd.arg("-drive").arg(disk);
     eprintln!("$ {cmd:?}");
-    let mut child = cmd.spawn().map_err(|err| {
-        format!("failed to start qemu-system-x86_64 (is QEMU installed and on PATH?): {err}")
-    })?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| format!("failed to start {}: {err}", qemu.display()))?;
 
     let started = Instant::now();
     loop {
@@ -275,14 +303,60 @@ fn run(options: &Options) -> Result<(), String> {
     }
 }
 
-fn pflash(path: &Path, readonly: bool) -> OsString {
-    let mut arg = OsString::from("if=pflash,format=raw,");
-    if readonly {
-        arg.push("readonly=on,");
+fn smoke(options: &Options) -> Result<(), String> {
+    let scenarios = Scenario::parse(options.scenario.as_deref().unwrap_or("all"))?;
+    let setup = smoke::Setup {
+        qemu: qemu::program()?,
+        firmware: options.firmware()?,
+        timeout: options.timeout.unwrap_or(SMOKE_TIMEOUT),
+        out_root: workspace_root()
+            .join("target")
+            .join("smoke")
+            .join(options.profile_dir()),
+    };
+    eprintln!("qemu: {}", setup.qemu.display());
+
+    // Build every needed image first so build time never counts against the
+    // boot timeout.
+    let mut normal = None;
+    let mut panic = None;
+    for scenario in &scenarios {
+        if scenario.needs_panic_kernel() {
+            if panic.is_none() {
+                panic = Some(build_image(options, KernelVariant::DeliberatePanic)?);
+            }
+        } else if normal.is_none() {
+            normal = Some(build_image(options, KernelVariant::Normal)?);
+        }
     }
-    arg.push("file=");
-    arg.push(path);
-    arg
+
+    let mut passed = Vec::new();
+    let mut failed = Vec::new();
+    for scenario in scenarios {
+        let image = if scenario.needs_panic_kernel() {
+            panic.as_deref()
+        } else {
+            normal.as_deref()
+        }
+        .ok_or("image was not built")?;
+        match smoke::run(scenario, image, &setup) {
+            Ok(summary) => passed.push(summary),
+            Err(err) => {
+                eprintln!("{err}");
+                failed.push(scenario.name());
+            }
+        }
+    }
+    eprintln!("--- smoke summary ---");
+    for summary in &passed {
+        eprintln!("{summary}");
+    }
+    if failed.is_empty() {
+        eprintln!("smoke: all {} scenario(s) passed", passed.len());
+        Ok(())
+    } else {
+        Err(format!("smoke scenario(s) failed: {}", failed.join(", ")))
+    }
 }
 
 fn git_lines(args: &[&str]) -> Result<Vec<String>, String> {
@@ -367,15 +441,24 @@ mod tests {
     #[test]
     fn options_parse_and_reject_unknown() {
         let opts = Options::parse(
-            ["--release", "--headless", "--timeout", "5"]
-                .map(String::from)
-                .into_iter(),
+            [
+                "--release",
+                "--headless",
+                "--timeout",
+                "5",
+                "--scenario",
+                "panic",
+            ]
+            .map(String::from)
+            .into_iter(),
         )
         .expect("valid options");
         assert!(opts.release);
         assert!(opts.headless);
         assert_eq!(opts.timeout, Some(Duration::from_secs(5)));
+        assert_eq!(opts.scenario.as_deref(), Some("panic"));
         assert!(Options::parse(["--bogus".to_string()].into_iter()).is_err());
         assert!(Options::parse(["--timeout".to_string()].into_iter()).is_err());
+        assert!(Options::parse(["--timeout", "0"].map(String::from).into_iter()).is_err());
     }
 }

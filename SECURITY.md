@@ -1,6 +1,7 @@
 # Security status
 
-This experimental OS is not production-ready and currently does not boot. The
+This experimental OS is not production-ready; it boots to a status screen in
+QEMU and does nothing else yet. The
 initial design runs the desktop and applications as trusted code sharing
 kernel privileges; it must not be described as isolating untrusted programs.
 Use disposable VM disk images only.

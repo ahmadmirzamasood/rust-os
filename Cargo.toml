@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "kernel",
     "crates/os-abi",
+    "crates/gfx",
+    "crates/boot-data",
     "userspace/desktop",
     "xtask",
     "tools/image-builder",
@@ -11,6 +13,8 @@ members = [
 # and the image builder compiles the bootloader, so both are driven by xtask.
 default-members = [
     "crates/os-abi",
+    "crates/gfx",
+    "crates/boot-data",
     "userspace/desktop",
     "xtask",
 ]
@@ -24,6 +28,17 @@ rust-version = "1.101"
 
 [workspace.dependencies]
 os-abi = { path = "crates/os-abi" }
+gfx = { path = "crates/gfx" }
+boot-data = { path = "crates/boot-data" }
+# Bitmap glyphs rasterized from Noto Sans Mono. Already compiled into the
+# bootloader's UEFI stage; only the sizes and weights we draw are enabled.
+noto-sans-mono-bitmap = { version = "=0.2.0", default-features = false, features = [
+    "regular",
+    "bold",
+    "size_16",
+    "size_32",
+    "unicode-basic-latin",
+] }
 bootloader_api = "=0.11.17"
 bootloader = { version = "=0.11.17", default-features = false, features = ["uefi"] }
 

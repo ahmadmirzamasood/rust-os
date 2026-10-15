@@ -1,6 +1,7 @@
 # Contributing
 
-The project is at the scaffolding stage: nothing boots yet. Focused, well-tested
+The project is at an early stage: the kernel boots in QEMU to a welcome
+screen and halts; nothing is usable yet. Focused, well-tested
 changes are welcome. Open an issue first for anything larger than a small fix.
 
 ## Before you start
@@ -37,8 +38,9 @@ Run before every pull request:
 cargo xtask ci
 ```
 
-If you touched `tools/image-builder` or boot configuration, also run
-`cargo xtask image`. If you claim anything boots, include the exact command,
+If you touched the kernel, `crates/gfx`, `crates/boot-data`,
+`tools/image-builder` or boot configuration, also run `cargo xtask smoke`
+(needs QEMU and OVMF). If you claim anything boots, include the exact command,
 VM and firmware versions, and the serial output. Never describe untested
 behavior as working.
 
