@@ -62,4 +62,40 @@ pub mod markers {
     pub const BOOT_STACK_GUARD: &str = "guard page below the boot kernel stack";
     /// Diagnosis text for the double-fault stack's guard page.
     pub const DOUBLE_FAULT_STACK_GUARD: &str = "guard page below the double-fault stack";
+    /// Exception report line naming the interrupted context (an IRQ handler
+    /// or normal code), the interrupt flag and the uptime.
+    pub const FAULT_CONTEXT: &str = "[rust-os]   context:";
+    /// Context text for an exception inside the timer interrupt handler.
+    pub const TIMER_IRQ_CONTEXT: &str = "IRQ 0 handler (PIT timer)";
+
+    /// Interrupt controller, timer and PS/2 setup finished; followed by a
+    /// summary.
+    pub const INTERRUPTS_READY: &str = "[rust-os] interrupts ready:";
+    /// Interrupt or input setup failed; followed by the reason.
+    pub const INTERRUPTS_FAILED: &str = "[rust-os] interrupts FAILED:";
+    /// Every input/interrupt self-test check passed.
+    pub const INPUT_SELFTEST_PASS: &str = "[rust-os] INPUT SELF-TEST PASS";
+    /// At least one input/interrupt self-test check failed.
+    pub const INPUT_SELFTEST_FAIL: &str = "[rust-os] INPUT SELF-TEST FAIL";
+    /// Prefix of one failed input self-test check, followed by its name.
+    pub const INPUT_SELFTEST_CHECK_FAILED: &str = "[rust-os]   input self-test check failed:";
+    /// Periodic timer line: `uptime <s> s (<ticks> ticks); ...`.
+    pub const TIMER_HEARTBEAT: &str = "[rust-os] timer: uptime";
+    /// The interactive screen is up: `button at <x>,<y> <w>x<h>; pointer at
+    /// <x>,<y>`.
+    pub const UI_READY: &str = "[rust-os] ui: ready;";
+    /// A key event: ` press|release <name> (scancode 0x..)[ char 'c']`.
+    pub const INPUT_KEY: &str = "[rust-os] input: key";
+    /// A mouse button event: ` <left|right|middle> down|up at <x>,<y>`.
+    pub const INPUT_MOUSE_BUTTON: &str = "[rust-os] input: mouse";
+    /// The test button was clicked: ` (<count>) at <x>,<y>`.
+    pub const UI_CLICK: &str = "[rust-os] ui: test button clicked";
+    /// F9 pressed: the event loop stops consuming input for a while so the
+    /// interrupt-side rings overflow.
+    pub const STALL_BEGIN: &str = "[rust-os] input: overflow test: event loop stalled";
+    /// The stall ended; followed by the ring counters.
+    pub const STALL_END: &str = "[rust-os] input: overflow test: resumed;";
+    /// After a stall, everything queued during it has been decoded and the
+    /// rings are empty again; input sent from now on is not dropped.
+    pub const STALL_DRAINED: &str = "[rust-os] input: overflow test: backlog drained;";
 }

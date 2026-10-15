@@ -1,10 +1,11 @@
 //! Polled 16550 UART driver for COM1, used for boot diagnostics.
 //!
 //! Output only. Every wait is bounded, so a missing or stuck UART drops
-//! bytes instead of hanging the kernel. The kernel runs on one CPU with
-//! interrupts masked and nothing here holds state across bytes, so concurrent
-//! writers cannot exist yet; once interrupts or more CPUs exist, lines from
-//! different contexts could interleave (never corrupt memory).
+//! bytes instead of hanging the kernel. The kernel runs on one CPU and
+//! interrupt handlers never print, so only the main loop writes, except a
+//! fatal exception report, whose lines could interleave with a line the
+//! main loop was printing. Nothing here holds state across bytes, so that
+//! never corrupts memory.
 
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};

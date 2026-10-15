@@ -22,12 +22,12 @@ newer. The kernel itself uses no nightly features.
 
 | Command | What it does | Status |
 | --- | --- | --- |
-| `cargo xtask lint` | `cargo fmt --all --check`; clippy on host crates (`--all-targets`); clippy on the kernel for `x86_64-unknown-none`, normal and with each fault-test feature (`deliberate-panic`, `deliberate-page-fault`, `deliberate-stack-overflow`); warnings are errors | Verified (Windows) |
-| `cargo xtask test` | `cargo test` on host-testable crates (`os-abi`, `gfx`, `boot-data`, `mm`, `desktop`, `xtask`) | Verified (Windows) |
+| `cargo xtask lint` | `cargo fmt --all --check`; clippy on host crates (`--all-targets`); clippy on the kernel for `x86_64-unknown-none`, normal and with each fault-test feature (`deliberate-panic`, `deliberate-page-fault`, `deliberate-stack-overflow`, `deliberate-interrupt-fault`); warnings are errors | Verified (Windows) |
+| `cargo xtask test` | `cargo test` on host-testable crates (`os-abi`, `gfx`, `boot-data`, `mm`, `input`, `desktop`, `xtask`) | Verified (Windows) |
 | `cargo xtask build [--release]` | Builds `target/x86_64-unknown-none/<profile>/kernel` (ELF) | Verified (Windows) |
 | `cargo xtask image [--release]` | Builds the kernel, then `tools/image-builder` writes `target/images/<profile>/rust-os-uefi.img` | Verified (Windows, including from an empty `target/`) |
 | `cargo xtask run [--ovmf-code <file>] [--ovmf-vars <file>] [--timeout <secs>] [--headless]` | Builds the image and starts QEMU with a display window and the serial port on stdio | Verified (Windows, QEMU 11.1.0) |
-| `cargo xtask smoke [--scenario boot\|panic\|no-display\|page-fault\|stack-overflow\|all] [--timeout <secs>] [--release]` | Automated boot test in headless QEMU; see below | Verified (Windows, QEMU 11.1.0, debug and release) |
+| `cargo xtask smoke [--scenario boot\|panic\|no-display\|page-fault\|stack-overflow\|interrupt-fault\|input\|all] [--timeout <secs>] [--release]` | Automated boot test in headless QEMU; see below | Verified (Windows, QEMU 11.1.0, debug and release) |
 | `cargo xtask check-private` | Fails if private paths are tracked or staged, or if `.agent-private/` is not ignored | Verified (Windows) |
 | `cargo xtask ci` | `lint` + `test` + `build` + `check-private` (no QEMU needed) | Verified (Windows) |
 
@@ -57,12 +57,13 @@ firmware as pflash and the image as a raw disk.
 
 Every step logs a `[rust-os]` line on COM1 (115200 8N1):
 
-1. Masks interrupts (no IDT exists yet) and initializes the 16550 UART,
+1. Masks interrupts and initializes the 16550 UART,
    checking it with a loopback byte. Waits on the UART are bounded; without a
    UART, output is dropped instead of hanging.
-2. Installs its own GDT, TSS and IDT: every CPU exception is reported, and
-   double faults run on a separate stack so a stack overflow is reported
-   too.
+2. Installs its own GDT, TSS and a 256-gate IDT: every CPU exception is
+   reported, double faults run on a separate stack so a stack overflow is
+   reported too, and vectors 32-255 have interrupt stubs. Remaps the 8259
+   PIC to vectors 32-47 and masks every line.
 3. Checks the bootloader API version, then copies the memory map into
    kernel-owned storage, sorts it and validates it (non-empty, no inverted or
    overlapping ranges, page-aligned usable regions, some usable memory).
@@ -78,17 +79,28 @@ Every step logs a `[rust-os]` line on COM1 (115200 8N1):
 6. Runs the memory self-test (frames, mappings, real faults on guard,
    read-only and no-execute pages, heap stress, exhaustion) and prints
    `[rust-os] MEMORY SELF-TEST PASS (<n> checks)`.
-7. Draws the welcome screen and prints `[rust-os] BOOT OK`. If any stage
-   failed, the screen and log say so and the final line is
-   `[rust-os] BOOT DEGRADED`. Without a framebuffer, serial output continues.
-8. Halts the CPU (`cli; hlt` loop).
+7. Calibrates the TSC against PIT channel 2, starts the 1000 Hz PIT tick,
+   initializes the PS/2 controller, keyboard and mouse, enables interrupts
+   and runs the input self-test (IDT gates, PIC mask, timer actually
+   ticking, clock monotonic, queue overflow and decoder resync on target):
+   `[rust-os] INPUT SELF-TEST PASS (<n> checks)`. See
+   [architecture/interrupts-input.md](architecture/interrupts-input.md).
+8. Draws the welcome screen, the input-debug panel and the pointer, and
+   prints `[rust-os] BOOT OK`. If any stage failed, the screen and log say
+   so and the line is `[rust-os] BOOT DEGRADED`. Without a framebuffer,
+   serial output continues.
+9. Runs the event loop: decodes input, updates the screen, logs key,
+   button and click events and a timer heartbeat, and sleeps with
+   `sti; hlt` between interrupts. F9 stalls the loop for 8 s (queue
+   overflow test).
 
 On a panic the kernel prints `[rust-os] KERNEL PANIC` with the source
 location and message, draws a red banner if the framebuffer is usable, and
 halts. It never allocates or waits on a lock while doing so. A fatal CPU
 exception first prints `[rust-os] CPU EXCEPTION:` with the decoded cause,
 the faulting address (CR2), the registers and the guard page involved (if
-any), then panics the same way.
+any), and the interrupted context (IRQ handler or normal code, interrupt
+flag, uptime ticks), then panics the same way.
 
 ## Boot smoke test
 
@@ -100,14 +112,16 @@ per scenario, measured from QEMU start).
 
 | Scenario | Image | Passes when |
 | --- | --- | --- |
-| `boot` | Normal | Serial has the memory self-test pass marker and `[rust-os] BOOT OK`, and no panic or CPU exception; a QMP screendump matches the kernel's reported resolution, the background colour at (1,1) is exact (catches RGB/BGR swaps), and title text, card and status dots are present |
+| `boot` | Normal | Serial has the memory and input self-test pass markers, the ui-ready line and `[rust-os] BOOT OK`, and no panic or CPU exception; a QMP screendump matches the kernel's reported resolution, the background colour at (1,1) is exact (catches RGB/BGR swaps), title text, card, status dots, input panel and button are present, and every pointer fill pixel is visible exactly at the reported pointer position |
 | `panic` | Kernel built with the `deliberate-panic` feature | Serial has the full panic report: message, location, "banner drawn", "CPU halted"; the screendump shows the red banner over the welcome screen |
 | `no-display` | Normal, QEMU with `-vga none` | No framebuffer is provided; serial reports `graphics unavailable`, the memory self-test still passes, and the log ends with `[rust-os] BOOT DEGRADED` |
 | `page-fault` | Kernel built with `deliberate-page-fault` | After the self-test passes, the kernel writes into the unmapped guard page below its double-fault stack. Serial must report a page fault with cause "page not present, write, kernel mode", a CR2 equal to the written address, and that guard page as the diagnosis, followed by the full panic report; the screendump shows the banner |
 | `stack-overflow` | Kernel built with `deliberate-stack-overflow` | After the self-test passes, the kernel recurses until the boot stack hits its guard page. Serial must report a double fault (handled on its own stack) diagnosed as the boot stack's guard page, followed by the full panic report; the screendump shows the banner |
+| `interrupt-fault` | Kernel built with `deliberate-interrupt-fault` | After the input self-test passes and the event loop runs, the timer interrupt handler writes into the double-fault stack's guard page (only while the loop is idle in `hlt`). Serial must report the page fault with context "IRQ 0 handler (PIT timer)", "interrupts were disabled", the right CR2 and guard page, then the full panic report; the screendump shows the banner |
+| `input` | Normal | As `boot`, then QMP `input-send-event` drives the PS/2 devices: `a`, Shift+`b` and Up are logged in order with scancodes and characters; the pointer is pinned at 0,0 and moved exactly onto the test button, and a click is counted; after QEMU-paced key and motion bursts a sentinel key and a second click work; F9 stalls the event loop while more input overflows the kernel rings (drops must be reported), then after the backlog drains a sentinel key and a third click work; timer heartbeats must track host time within a ratio of 0.5-2.0; the final screendump shows the pointer on the hovered button |
 
-Every scenario fails as soon as the log shows a memory self-test failure or a
-memory initialization failure. A guest that triple-faults does not exit,
+Every scenario fails as soon as the log shows a memory or input self-test
+failure, a memory initialization failure, or interrupts failing to enable. A guest that triple-faults does not exit,
 because QEMU runs with `-no-reboot -no-shutdown`; it shows up as the
 timeout.
 
@@ -127,9 +141,10 @@ to `master`, every pull request, and on demand:
 - **check** (Ubuntu and Windows): `cargo xtask ci`.
 - **boot-smoke** (Ubuntu): lints `image-builder`, then runs
   `cargo xtask smoke` (all scenarios) with the distribution's QEMU and OVMF.
-  It has passed on GitHub for the `boot`, `panic` and `no-display`
-  scenarios. The `page-fault` and `stack-overflow` scenarios and the memory
-  self-test have so far been verified only on the Windows host above.
+  All seven scenarios, including `interrupt-fault` and `input`, have
+  passed there (debug profile). On that runner QEMU delivered the full
+  1000 timer interrupts per second. Release-profile smoke runs have been
+  verified only on the Windows host above.
 
 Actions are pinned to commit SHAs; the toolchain comes from
 `rust-toolchain.toml`.

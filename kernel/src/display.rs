@@ -90,3 +90,8 @@ pub fn with_canvas<R>(draw: impl FnOnce(&mut Canvas<'_>) -> R) -> Option<R> {
     let mut canvas = Canvas::new(display.buffer, display.layout).ok()?;
     Some(draw(&mut canvas))
 }
+
+/// Layout of the installed framebuffer, if any (and not busy).
+pub fn layout() -> Option<Layout> {
+    DISPLAY.try_lock()?.as_ref().map(|d| d.layout)
+}

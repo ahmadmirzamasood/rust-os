@@ -14,10 +14,15 @@
 //!    only.
 //! 5. Set up memory management (frames, kernel mappings, heap, guarded
 //!    double-fault stack) and run the memory self-test.
-//! 6. Draw the welcome screen, print `[rust-os] BOOT OK` (or
-//!    `BOOT DEGRADED`) and halt the CPU.
+//! 6. Program the 8259 PIC (remapped and fully masked right after step 2),
+//!    the PIT tick and the PS/2 keyboard and mouse, enable interrupts and
+//!    run the input self-test.
+//! 7. Draw the welcome screen and the input-debug panel, print
+//!    `[rust-os] BOOT OK` (or `BOOT DEGRADED`) and enter the event loop:
+//!    pointer, clicks and key events on screen and on serial.
 //!
-//! External interrupts stay masked; there is no scheduler yet.
+//! There is no scheduler: the event loop is the only thread of execution
+//! besides interrupt handlers.
 
 #![no_std]
 #![no_main]
@@ -26,10 +31,16 @@ extern crate alloc;
 
 mod arch;
 mod display;
+mod drivers;
+mod event_loop;
+mod input_events;
+mod input_selftest;
 mod memory;
 mod panic;
 mod serial;
 mod sync;
+mod time;
+mod ui;
 
 use core::fmt::Write;
 
@@ -41,8 +52,12 @@ use bootloader_api::{BootInfo, entry_point};
 use gfx::screens::{StageState, StatusLine, Welcome};
 use gfx::{FmtBuf, Layout};
 
+use crate::arch::x86_64::{interrupts, pic, tables};
 use crate::display::DisplayError;
+use crate::drivers::ps2;
+use crate::input_events::Pipeline;
 use crate::sync::TryLock;
+use crate::ui::Ui;
 
 /// Boot stack size. The bootloader maps it with an unmapped guard page below.
 const KERNEL_STACK_SIZE: u64 = 128 * 1024;
@@ -78,15 +93,23 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut degraded = false;
 
     // --- CPU tables -------------------------------------------------------
-    if arch::x86_64::tables::init() {
-        let (bottom, top) = arch::x86_64::tables::emergency_stack();
+    if tables::init() {
+        let (bottom, top) = tables::emergency_stack();
         kprintln!(
-            "[rust-os] CPU tables: GDT with TSS, IDT for exception vectors 0-31; \
-             double faults on IST1 (bootstrap stack {:#x}..{:#x})",
+            "[rust-os] CPU tables: GDT with TSS, IDT with 256 gates (exceptions 0-31, \
+             interrupt stubs 32-255: {}); double faults on IST1 (bootstrap stack {:#x}..{:#x})",
+            if tables::interrupt_gates_installed() {
+                "installed"
+            } else {
+                "LAYOUT CHECK FAILED, interrupts stay off"
+            },
             bottom,
             top
         );
     }
+    // Remap the 8259 pair away from the exception vectors and mask every
+    // line before anything could unmask interrupts.
+    pic::init();
 
     // --- Boot information -------------------------------------------------
     let api_ok = check_api_version(boot_info.api_version);
@@ -160,26 +183,158 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         }
     );
 
+    // --- Interrupts, timer and input ------------------------------------
+    let input = init_interrupts();
+    degraded |= !input.ok();
+
+    let (screen_w, screen_h) = display_size();
+    let pipeline = Pipeline::new(screen_w, screen_h);
+    let mut ui = None;
     if let Ok(layout) = &graphics {
-        let drawn = draw_welcome(serial_ok, api_ok, &memory, &mm_status, layout);
-        if drawn {
-            kprintln!("[rust-os] welcome screen drawn");
-        } else {
-            degraded = true;
-            kprintln!("[rust-os] welcome screen NOT drawn: framebuffer busy");
+        let welcome = WelcomeInfo {
+            serial_ok,
+            api_ok,
+            memory: &memory,
+            mm_status: &mm_status,
+            input: &input,
+            layout,
+        };
+        let pointer = pipeline.pointer().position();
+        match Ui::new(*layout, pointer, |canvas| draw_welcome(&welcome, canvas)) {
+            Ok(created) => {
+                let b = created.button_rect();
+                kprintln!(
+                    "{} button at {},{} {}x{}; pointer at {},{}",
+                    markers::UI_READY,
+                    b.x,
+                    b.y,
+                    b.w,
+                    b.h,
+                    pointer.0,
+                    pointer.1
+                );
+                let mut created = created;
+                if created.render(&event_loop::status(&pipeline)) {
+                    kprintln!(
+                        "[rust-os] welcome screen drawn: first frame with input panel and pointer"
+                    );
+                } else {
+                    degraded = true;
+                    kprintln!("[rust-os] welcome screen NOT drawn: framebuffer busy");
+                }
+                ui = Some(created);
+            }
+            Err(err) => {
+                degraded = true;
+                kprintln!("[rust-os] interactive screen unavailable: {:?}", err);
+                if display::with_canvas(|canvas| draw_welcome(&welcome, canvas)).is_some() {
+                    kprintln!("[rust-os] welcome screen drawn (no pointer or input panel)");
+                } else {
+                    kprintln!("[rust-os] welcome screen NOT drawn: framebuffer busy");
+                }
+            }
         }
     }
 
-    finish(degraded)
+    finish(degraded, input, pipeline, ui)
 }
 
-/// Report the boot outcome and halt.
-#[cfg(not(any(
-    feature = "deliberate-panic",
-    feature = "deliberate-page-fault",
-    feature = "deliberate-stack-overflow"
-)))]
-fn finish(degraded: bool) -> ! {
+/// Outcome of interrupt, timer and input setup.
+#[derive(Debug, Clone, Copy)]
+struct InputStatus {
+    gates: bool,
+    ps2: ps2::InitReport,
+    tick_millihertz: u64,
+    selftest: Option<input_selftest::Outcome>,
+}
+
+impl InputStatus {
+    fn ok(&self) -> bool {
+        self.gates
+            && self.ps2.controller.is_ok()
+            && self.ps2.keyboard.is_ok()
+            && self.ps2.mouse.is_ok()
+            && self.selftest.is_some_and(|s| s.passed())
+    }
+}
+
+/// Program the PIT and PS/2 devices, enable interrupts and run the input
+/// self-test. Interrupts stay disabled if the IDT has no interrupt gates.
+fn init_interrupts() -> InputStatus {
+    let rate = time::init();
+    pic::unmask(interrupts::TIMER_IRQ);
+    let ps2 = ps2::init();
+    let describe = |r: &Result<(), ps2::Ps2Error>| match r {
+        Ok(()) => "ok",
+        Err(_) => "FAILED",
+    };
+    kprintln!(
+        "[rust-os] PS/2: controller {}, keyboard {}, mouse {} ({} stale bytes flushed)",
+        describe(&ps2.controller),
+        describe(&ps2.keyboard),
+        describe(&ps2.mouse),
+        ps2.flushed
+    );
+    for (what, result) in [
+        ("controller", ps2.controller),
+        ("keyboard", ps2.keyboard),
+        ("mouse", ps2.mouse),
+    ] {
+        if let Err(err) = result {
+            kprintln!("[rust-os]   PS/2 {}: {:?}", what, err);
+        }
+    }
+    let gates = tables::interrupt_gates_installed();
+    if !gates {
+        kprintln!(
+            "{} IDT interrupt stubs failed their layout check; interrupts stay disabled",
+            markers::INTERRUPTS_FAILED
+        );
+        return InputStatus {
+            gates,
+            ps2,
+            tick_millihertz: rate.millihertz,
+            selftest: None,
+        };
+    }
+    arch::x86_64::enable_interrupts();
+    kprintln!(
+        "{} 8259 PIC (vectors {}-{}, mask {:#06x}), PIT divisor {} = {}.{:03} Hz, interrupts enabled",
+        markers::INTERRUPTS_READY,
+        pic::MASTER_OFFSET,
+        pic::MASTER_OFFSET + pic::LINES - 1,
+        pic::mask(),
+        rate.divisor,
+        rate.millihertz / 1000,
+        rate.millihertz % 1000
+    );
+    match rate.tsc_hz {
+        Some(hz) => kprintln!(
+            "[rust-os] clock: TSC calibrated against PIT channel 2 at {}.{:03} MHz (invariant TSC {})",
+            hz / 1_000_000,
+            (hz / 1000) % 1000,
+            if rate.tsc_invariant {
+                "reported"
+            } else {
+                "not reported by CPUID"
+            }
+        ),
+        None => {
+            kprintln!("[rust-os] clock: TSC calibration FAILED; uptime falls back to timer ticks")
+        }
+    }
+    let selftest = input_selftest::run(&ps2);
+    InputStatus {
+        gates,
+        ps2,
+        tick_millihertz: rate.millihertz,
+        selftest: Some(selftest),
+    }
+}
+
+/// Report the boot outcome and run the event loop (or halt if interrupts
+/// could not be enabled).
+fn report_and_run(degraded: bool, pipeline: Pipeline, ui: Option<Ui>) -> ! {
     if degraded {
         kprintln!(
             "{}: kernel initialized with failures listed above",
@@ -187,17 +342,60 @@ fn finish(degraded: bool) -> ! {
         );
     } else {
         kprintln!(
-            "{}: kernel initialized, welcome screen drawn",
+            "{}: kernel initialized, interactive screen up",
             markers::BOOT_OK
         );
     }
-    kprintln!("[rust-os] halting CPU (no interrupts or scheduler yet)");
-    arch::halt_forever()
+    if !arch::x86_64::interrupts_enabled() {
+        kprintln!("[rust-os] halting CPU (interrupts unavailable)");
+        arch::halt_forever()
+    }
+    #[cfg(feature = "deliberate-interrupt-fault")]
+    arm_interrupt_fault();
+    kprintln!("[rust-os] entering event loop");
+    event_loop::run(pipeline, ui)
+}
+
+/// Smoke-test build: a page fault inside the timer interrupt handler while
+/// the event loop runs (it fires only while the loop is idle in `hlt`, so
+/// the screen is never mid-update). Expected: a page-fault report whose
+/// context names the IRQ 0 handler, then the panic banner.
+#[cfg(feature = "deliberate-interrupt-fault")]
+fn arm_interrupt_fault() {
+    let guard = memory::find_guard(markers::DOUBLE_FAULT_STACK_GUARD)
+        .expect("double-fault stack guard registered");
+    kprintln!(
+        "{} write to {:#x} from the timer interrupt in {} ticks",
+        markers::DELIBERATE_FAULT,
+        guard + 0x10,
+        time::deliberate::FAULT_DELAY_TICKS
+    );
+    time::deliberate::arm(guard + 0x10);
+}
+
+/// Screen size for the pointer, or a nominal size without a display (the
+/// pointer is then only reported on serial).
+fn display_size() -> (u32, u32) {
+    display::layout().map_or((640, 480), |l| (l.width() as u32, l.height() as u32))
+}
+
+/// Normal build (and the interrupt-fault test, which faults later from the
+/// event loop).
+#[cfg(not(any(
+    feature = "deliberate-panic",
+    feature = "deliberate-page-fault",
+    feature = "deliberate-stack-overflow"
+)))]
+fn finish(degraded: bool, _input: InputStatus, pipeline: Pipeline, ui: Option<Ui>) -> ! {
+    report_and_run(degraded, pipeline, ui)
 }
 
 /// Smoke-test build: exercise the panic path once the welcome screen is up.
 #[cfg(feature = "deliberate-panic")]
-fn finish(_degraded: bool) -> ! {
+fn finish(_degraded: bool, _input: InputStatus, _pipeline: Pipeline, _ui: Option<Ui>) -> ! {
+    // Early-failure build: the event loop is never reached, but stays
+    // compiled (and linted) like in the normal build.
+    let _ = report_and_run as fn(bool, Pipeline, Option<Ui>) -> !;
     panic!("{}", markers::DELIBERATE_PANIC_MESSAGE)
 }
 
@@ -205,7 +403,10 @@ fn finish(_degraded: bool) -> ! {
 /// double-fault stack. Expected: a page-fault report naming that guard page,
 /// then the panic banner.
 #[cfg(feature = "deliberate-page-fault")]
-fn finish(_degraded: bool) -> ! {
+fn finish(_degraded: bool, _input: InputStatus, _pipeline: Pipeline, _ui: Option<Ui>) -> ! {
+    // Early-failure build: the event loop is never reached, but stays
+    // compiled (and linted) like in the normal build.
+    let _ = report_and_run as fn(bool, Pipeline, Option<Ui>) -> !;
     let guard = memory::find_guard(markers::DOUBLE_FAULT_STACK_GUARD)
         .expect("double-fault stack guard registered");
     kprintln!("{} write to {:#x}", markers::DELIBERATE_FAULT, guard + 0x10);
@@ -221,7 +422,10 @@ fn finish(_degraded: bool) -> ! {
 /// Expected: a double fault (handled on the IST stack) whose report names the
 /// boot stack's guard page, then the panic banner.
 #[cfg(feature = "deliberate-stack-overflow")]
-fn finish(_degraded: bool) -> ! {
+fn finish(_degraded: bool, _input: InputStatus, _pipeline: Pipeline, _ui: Option<Ui>) -> ! {
+    // Early-failure build: the event loop is never reached, but stays
+    // compiled (and linted) like in the normal build.
+    let _ = report_and_run as fn(bool, Pipeline, Option<Ui>) -> !;
     #[allow(unconditional_recursion)]
     fn recurse(depth: u64) -> u64 {
         let frame = core::hint::black_box([depth; 64]);
@@ -367,13 +571,25 @@ fn load_memory_map(regions: &[MemoryRegion]) -> Result<MemorySummary, MemoryMapE
     }
 }
 
-fn draw_welcome(
+/// Everything the welcome card reports.
+struct WelcomeInfo<'a> {
     serial_ok: bool,
     api_ok: bool,
-    memory: &Result<MemorySummary, MemoryMapError>,
-    mm_status: &MemoryStatus,
-    layout: &Layout,
-) -> bool {
+    memory: &'a Result<MemorySummary, MemoryMapError>,
+    mm_status: &'a MemoryStatus,
+    input: &'a InputStatus,
+    layout: &'a Layout,
+}
+
+fn draw_welcome(info: &WelcomeInfo<'_>, canvas: &mut gfx::Canvas<'_>) {
+    let WelcomeInfo {
+        serial_ok,
+        api_ok,
+        memory,
+        mm_status,
+        input,
+        layout,
+    } = *info;
     let state = |ok: bool| {
         if ok {
             StageState::Ok
@@ -442,7 +658,26 @@ fn draw_welcome(
         layout.format(),
         layout.bytes_per_pixel()
     );
-    let all_ok = serial_ok && api_ok && memory.is_ok() && memory_ok;
+    let mut interrupt_line = FmtBuf::<64>::new();
+    let _ = write!(
+        interrupt_line,
+        "8259 PIC, PIT {} Hz tick, TSC clock{}",
+        input.tick_millihertz / 1000,
+        match input.selftest {
+            Some(s) if s.passed() => ", self-test passed",
+            Some(_) => ", self-test FAILED",
+            None => ", NOT enabled",
+        }
+    );
+    let input_devices_ok =
+        input.ps2.keyboard.is_ok() && input.ps2.mouse.is_ok() && input.ps2.controller.is_ok();
+    let input_line = match (input.ps2.keyboard.is_ok(), input.ps2.mouse.is_ok()) {
+        (true, true) => "PS/2 keyboard and mouse (no USB support)",
+        (true, false) => "PS/2 keyboard only; mouse unavailable",
+        (false, true) => "PS/2 mouse only; keyboard unavailable",
+        (false, false) => "no PS/2 input devices",
+    };
+    let all_ok = serial_ok && api_ok && memory.is_ok() && memory_ok && input.ok();
 
     let lines = [
         StatusLine {
@@ -475,6 +710,16 @@ fn draw_welcome(
             state: StageState::Ok,
         },
         StatusLine {
+            label: "Interrupts",
+            value: interrupt_line.as_str(),
+            state: state(input.gates && input.selftest.is_some_and(|s| s.passed())),
+        },
+        StatusLine {
+            label: "Input",
+            value: input_line,
+            state: state(input_devices_ok),
+        },
+        StatusLine {
             label: "Status",
             value: if all_ok {
                 "Kernel initialized"
@@ -488,7 +733,8 @@ fn draw_welcome(
         title: "rust-os",
         subtitle: "An experimental operating system written in Rust",
         lines: &lines,
-        footer: "Early boot: no input, files or desktop yet. Diagnostics on COM1.",
+        footer: "No files or desktop yet. Diagnostics on COM1.",
+        reserve_bottom: gfx::screens::input_panel_reserve(ui::PANEL_LINES),
     };
-    display::with_canvas(|canvas| gfx::screens::draw_welcome(canvas, &welcome)).is_some()
+    gfx::screens::draw_welcome(canvas, &welcome);
 }

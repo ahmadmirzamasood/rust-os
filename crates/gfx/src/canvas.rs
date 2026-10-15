@@ -18,6 +18,28 @@ impl Rect {
     pub const fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
         Self { x, y, w, h }
     }
+
+    /// Whether the point (`px`, `py`) lies inside (right/bottom edges
+    /// excluded).
+    pub fn contains(&self, px: i32, py: i32) -> bool {
+        let (px, py) = (i64::from(px), i64::from(py));
+        let (x, y) = (i64::from(self.x), i64::from(self.y));
+        px >= x && py >= y && px < x + i64::from(self.w) && py < y + i64::from(self.h)
+    }
+
+    /// Whether the two rectangles share at least one pixel.
+    pub fn intersects(&self, other: &Rect) -> bool {
+        let (ax, ay) = (i64::from(self.x), i64::from(self.y));
+        let (bx, by) = (i64::from(other.x), i64::from(other.y));
+        self.w > 0
+            && self.h > 0
+            && other.w > 0
+            && other.h > 0
+            && ax < bx + i64::from(other.w)
+            && bx < ax + i64::from(self.w)
+            && ay < by + i64::from(other.h)
+            && by < ay + i64::from(self.h)
+    }
 }
 
 /// A drawing surface over `buf`, described by a validated [`Layout`].
@@ -107,6 +129,39 @@ impl<'a> Canvas<'a> {
             pen = pen.saturating_add(advance);
         }
         i32::try_from(pen).unwrap_or(i32::MAX)
+    }
+
+    /// Set one pixel if (`x`, `y`) is on screen.
+    pub fn set_pixel(&mut self, x: i32, y: i32, color: Rgb) {
+        let px = self.layout.encode(color);
+        self.put(i64::from(x), i64::from(y), &px);
+    }
+
+    /// Copy `rect` (clipped to the screen) from `src`, a buffer with this
+    /// canvas's layout, for example a back buffer. Returns `false` and
+    /// copies nothing if `src` is too short for the layout.
+    pub fn blit_from(&mut self, src: &[u8], rect: Rect) -> bool {
+        if self.layout.check_buffer(src.len()).is_err() {
+            return false;
+        }
+        let (w, h) = (self.width() as i64, self.height() as i64);
+        let (x0, y0) = (i64::from(rect.x), i64::from(rect.y));
+        let x1 = (x0 + i64::from(rect.w)).clamp(0, w);
+        let y1 = (y0 + i64::from(rect.h)).clamp(0, h);
+        let (x0, y0) = (x0.clamp(0, w), y0.clamp(0, h));
+        if x0 >= x1 || y0 >= y1 {
+            return true;
+        }
+        let bpp = self.layout.bytes_per_pixel();
+        let stride = self.layout.stride();
+        // Same bounds argument as `fill_span_rows`; both buffers passed
+        // `check_buffer` for the same layout.
+        for y in y0 as usize..y1 as usize {
+            let start = (y * stride + x0 as usize) * bpp;
+            let end = (y * stride + x1 as usize) * bpp;
+            self.buf[start..end].copy_from_slice(&src[start..end]);
+        }
+        true
     }
 
     /// Write one encoded pixel if (`x`, `y`) is on screen.
@@ -268,6 +323,33 @@ mod tests {
         assert_eq!(buf[19 * 20], PAD, "bottom-left corner");
         assert_eq!(buf[10 * 20 + 10], 255, "centre");
         assert_eq!(buf[10], 255, "middle of top edge");
+    }
+
+    #[test]
+    fn rect_geometry() {
+        let r = Rect::new(10, 20, 5, 4);
+        assert!(r.contains(10, 20) && r.contains(14, 23));
+        assert!(!r.contains(15, 20) && !r.contains(10, 24) && !r.contains(9, 21));
+        assert!(!Rect::new(i32::MAX, i32::MAX, u32::MAX, u32::MAX).contains(0, 0));
+        assert!(r.intersects(&Rect::new(14, 23, 10, 10)));
+        assert!(!r.intersects(&Rect::new(15, 20, 10, 10)));
+        assert!(!r.intersects(&Rect::new(10, 20, 0, 10)));
+    }
+
+    #[test]
+    fn blit_copies_only_the_clipped_rect() {
+        let layout = Layout::new(4, 3, 6, 1, PixelFormat::Gray).unwrap();
+        let src: std::vec::Vec<u8> = (0..18).collect();
+        let mut buf = canvas_buf(&layout);
+        let mut canvas = Canvas::new(&mut buf, layout).unwrap();
+        assert!(canvas.blit_from(&src, Rect::new(-1, 1, 3, 10)));
+        assert!(!canvas.blit_from(&src[..5], Rect::new(0, 0, 4, 3)));
+        let expect = [
+            PAD, PAD, PAD, PAD, PAD, PAD, //
+            6, 7, PAD, PAD, PAD, PAD, //
+            12, 13, PAD, PAD, PAD, PAD,
+        ];
+        assert_eq!(buf, expect);
     }
 
     #[test]

@@ -186,6 +186,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "input"
+version = "0.0.0"
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -209,6 +213,7 @@ dependencies = [
  "boot-data",
  "bootloader_api",
  "gfx",
+ "input",
  "mm",
  "os-abi",
 ]

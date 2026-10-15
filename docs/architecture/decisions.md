@@ -174,3 +174,42 @@ arithmetic, and still needs physical access for new frames).
 **Cost:** bootloader-owned memory is never reclaimed; the heap never
 shrinks; only 4 KiB pages are created. See
 [memory.md](memory.md#known-limitations).
+
+## ADR-013 — 8259 PIC, PIT tick, TSC clock
+
+**Decision:** external interrupts use the legacy 8259 pair, remapped to
+vectors 32–47, with the local APIC left in the firmware's virtual-wire mode.
+The PIT drives a 1000 Hz wake-up tick on IRQ 0. Uptime comes from the TSC,
+calibrated once against PIT channel 2 by polling. The IDT has stubs for all
+256 vectors, so a stray vector is counted instead of faulting.
+
+**Why:** on one CPU in QEMU `q35`, the 8259 needs no ACPI parsing and no
+MMIO mappings, so it is the smallest working path. Measured on the Windows
+host, QEMU delivered only 85–700 of the 1000 PIT interrupts per second (the
+Ubuntu CI runner got all 1000), so a tick counter is not a reliable clock.
+Polled calibration does not depend on interrupt delivery.
+
+**Rejected for now:** I/O APIC + local APIC (needed later for SMP and MSI;
+requires MADT parsing and MMIO); HPET (more setup for no benefit at this
+stage).
+
+**Cost:** assumes a constant-rate TSC. Must be revisited for SMP and for
+VirtualBox/VMware.
+
+## ADR-014 — Interrupt-side byte rings, main-loop decoding
+
+**Decision:** keyboard and mouse handlers only push raw bytes into fixed
+lock-free single-producer/single-consumer rings (256 and 512 bytes). Full
+means drop the new byte and count it. Decoding, pointer state, a 64-event
+queue (merge moves, else drop oldest), drawing and logging run in the main
+loop. The logic lives in the host-tested `input` crate, which has no
+`unsafe` code.
+
+**Why:** handlers stay short and lock-free, so a handler can never wait on
+the code it interrupted. Dropping the newest byte keeps the producer out of
+slots the consumer may be reading. Drop counters let decoders resynchronize
+multi-byte sequences.
+
+**Verified:** a deliberate 8 s main-loop stall overflowed both rings in
+QEMU; the system recovered without corruption or deadlock (see
+[interrupts-input.md](interrupts-input.md)).

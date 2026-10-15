@@ -10,9 +10,12 @@
 //! - a TSS whose IST slot 1 holds the double-fault stack. It starts as a
 //!   static emergency stack and is later replaced by a heap-independent stack
 //!   with an unmapped guard page ([`set_double_fault_stack`]);
-//! - an IDT with a gate for each of the 32 CPU exception vectors. Vectors 32
-//!   and above (external interrupts) are outside the IDT limit; they stay
-//!   masked (`cli`, no interrupt controller programmed).
+//! - an IDT with all 256 gates: the 32 CPU exception vectors, and vectors
+//!   32..=255 for external interrupts (the 8259 PIC delivers 32..48; any
+//!   other vector is counted and reported as unexpected instead of faulting).
+//!   If the interrupt stub block fails its layout check, the external gates
+//!   stay absent and [`init`] reports it; the kernel then never enables
+//!   interrupts.
 //!
 //! The tables are statics that the CPU reads for the rest of the kernel's
 //! life; they are written only by [`init`] (once) and
@@ -35,8 +38,10 @@ pub const DOUBLE_FAULT_IST: u8 = 1;
 /// Size of the static emergency stack used until the guarded one exists.
 const EMERGENCY_STACK_SIZE: usize = 16 * 1024;
 
-/// Number of IDT gates: the CPU exception vectors.
+/// Number of CPU exception vectors (gates 0..32).
 pub const EXCEPTION_VECTORS: usize = 32;
+/// Number of IDT gates.
+pub const IDT_ENTRIES: usize = 256;
 
 /// 64-bit task-state segment (Intel SDM vol. 3, 8.7).
 #[repr(C, packed(4))]
@@ -99,7 +104,7 @@ impl Gate {
 struct Tables {
     gdt: [u64; 5],
     tss: TaskStateSegment,
-    idt: [Gate; EXCEPTION_VECTORS],
+    idt: [Gate; IDT_ENTRIES],
 }
 
 #[repr(C, align(16))]
@@ -125,13 +130,14 @@ static TABLES: CpuData<Tables> = CpuData(UnsafeCell::new(Tables {
         reserved3: 0,
         io_map_base: 0,
     },
-    idt: [Gate::MISSING; EXCEPTION_VECTORS],
+    idt: [Gate::MISSING; IDT_ENTRIES],
 }));
 
 static EMERGENCY_STACK: CpuData<EmergencyStack> =
     CpuData(UnsafeCell::new(EmergencyStack([0; EMERGENCY_STACK_SIZE])));
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
+static INTERRUPT_GATES: AtomicBool = AtomicBool::new(false);
 
 /// Flat 64-bit ring-0 code segment: present, DPL 0, code, readable, L=1.
 const KERNEL_CODE: u64 = 0x00AF_9A00_0000_FFFF;
@@ -150,7 +156,8 @@ fn tss_descriptor(base: u64) -> (u64, u64) {
 }
 
 /// Install the GDT, TSS and IDT. Returns `false` (and does nothing) if
-/// called again.
+/// called again. Check [`interrupt_gates_installed`] before enabling
+/// interrupts.
 pub fn init() -> bool {
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         return false;
@@ -166,7 +173,7 @@ pub fn init() -> bool {
     tables.tss.interrupt_stacks[usize::from(DOUBLE_FAULT_IST - 1)] = emergency_top;
     let (tss_low, tss_high) = tss_descriptor(&raw const tables.tss as u64);
     tables.gdt = [0, KERNEL_CODE, KERNEL_DATA, tss_low, tss_high];
-    for (vector, gate) in tables.idt.iter_mut().enumerate() {
+    for (vector, gate) in tables.idt[..EXCEPTION_VECTORS].iter_mut().enumerate() {
         let ist = if vector == exceptions::DOUBLE_FAULT {
             DOUBLE_FAULT_IST
         } else {
@@ -174,13 +181,19 @@ pub fn init() -> bool {
         };
         *gate = Gate::interrupt(handlers[vector], ist);
     }
+    if let Some(stubs) = exceptions::interrupt_entry_points() {
+        for (gate, &stub) in tables.idt[EXCEPTION_VECTORS..].iter_mut().zip(&stubs) {
+            *gate = Gate::interrupt(stub, 0);
+        }
+        INTERRUPT_GATES.store(true, Ordering::SeqCst);
+    }
 
     let gdt = DescriptorTablePointer {
         limit: (size_of::<[u64; 5]>() - 1) as u16,
         base: &raw const tables.gdt as u64,
     };
     let idt = DescriptorTablePointer {
-        limit: (size_of::<[Gate; EXCEPTION_VECTORS]>() - 1) as u16,
+        limit: (size_of::<[Gate; IDT_ENTRIES]>() - 1) as u16,
         base: &raw const tables.idt as u64,
     };
     // SAFETY: the GDT is a static with valid code/data/TSS descriptors at the
@@ -191,10 +204,17 @@ pub fn init() -> bool {
     unsafe { reload_segments(KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR) };
     // SAFETY: 0x18 is the available TSS descriptor built above.
     unsafe { load_task_register(TSS_SELECTOR) };
-    // SAFETY: the IDT is a static whose 32 gates point at the entry stubs in
-    // `exceptions`, which follow the interrupt calling convention.
+    // SAFETY: the IDT is a static whose present gates point at the entry
+    // stubs in `exceptions`, which follow the interrupt calling convention;
+    // absent gates (only if the stub check failed) raise #GP when used.
     unsafe { load_idt(&idt) };
     true
+}
+
+/// Whether gates 32..=255 point at interrupt stubs. Without them,
+/// interrupts must stay disabled.
+pub fn interrupt_gates_installed() -> bool {
+    INTERRUPT_GATES.load(Ordering::SeqCst)
 }
 
 /// Point IST slot 1 (double faults) at the stack whose top is `top`.

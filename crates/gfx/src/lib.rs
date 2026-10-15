@@ -10,10 +10,12 @@
 #![forbid(unsafe_code)]
 
 pub mod canvas;
+pub mod cursor;
 pub mod layout;
 pub mod screens;
 pub mod text;
 pub mod theme;
+pub mod widgets;
 
 pub use canvas::{Canvas, Rect};
 pub use layout::{Layout, LayoutError, PixelFormat};

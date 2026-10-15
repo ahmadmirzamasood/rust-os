@@ -16,6 +16,14 @@
 //! `call`, as the System V ABI requires. The kernel target disables the red
 //! zone, so interrupted code keeps nothing below RSP.
 //!
+//! Vectors 32..=255 (external interrupts) have stubs of their own, generated
+//! with `.irp` into one block at a fixed 16-byte stride, so the IDT can be
+//! built from the block's address ([`interrupt_entry_points`]). They push a
+//! zero error code and the vector and share the same common path; the
+//! dispatcher hands them to [`super::interrupts::handle`] and returns. The
+//! kernel target is soft-float (no SSE/x87 state is touched by Rust code), so
+//! the fifteen general-purpose registers are the whole interrupted state.
+//!
 //! # Policy
 //!
 //! - A page fault or #GP raised by a probe instruction is recovered: the
@@ -125,6 +133,26 @@ RUST_OS_EXC_ERR 29
 RUST_OS_EXC_ERR 30
 RUST_OS_EXC_NOERR 31
 
+// External-interrupt stubs: one per vector 32..=255, each padded to exactly
+// 16 bytes (push imm8/imm32 + push imm + jmp rel32 <= 12 bytes), so stub v is
+// at rust_os_irq_stubs + (v - 32) * 16. `interrupt_entry_points` checks the
+// block's total size before the IDT uses it.
+.p2align 4
+.globl rust_os_irq_stubs
+.hidden rust_os_irq_stubs
+rust_os_irq_stubs:
+// (LLVM does not accept line continuations, hence one long line.)
+.irp vector, 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255
+    .p2align 4
+    push 0
+    push \vector
+    jmp rust_os_exc_common
+.endr
+.p2align 4
+.globl rust_os_irq_stubs_end
+.hidden rust_os_irq_stubs_end
+rust_os_irq_stubs_end:
+
 .p2align 4
 rust_os_exc_common:
     push rax
@@ -224,6 +252,36 @@ pub fn entry_points() -> [u64; super::tables::EXCEPTION_VECTORS] {
     ]
 }
 
+/// Size of one external-interrupt stub in the generated block.
+const INTERRUPT_STUB_STRIDE: u64 = 16;
+
+/// Entry-stub addresses for vectors 32..=255, or `None` if the assembled
+/// block does not have the expected fixed stride (then no gate may use it).
+pub fn interrupt_entry_points() -> Option<[u64; 256 - super::tables::EXCEPTION_VECTORS]> {
+    let start: u64;
+    let end: u64;
+    // SAFETY: `lea` only computes addresses of symbols defined in the global
+    // assembly above.
+    unsafe {
+        core::arch::asm!(
+            "lea {start}, [rip + rust_os_irq_stubs]",
+            "lea {end}, [rip + rust_os_irq_stubs_end]",
+            start = out(reg) start,
+            end = out(reg) end,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    const COUNT: usize = 256 - super::tables::EXCEPTION_VECTORS;
+    if end.checked_sub(start) != Some(COUNT as u64 * INTERRUPT_STUB_STRIDE) {
+        return None;
+    }
+    let mut entries = [0u64; COUNT];
+    for (i, entry) in entries.iter_mut().enumerate() {
+        *entry = start + i as u64 * INTERRUPT_STUB_STRIDE;
+    }
+    Some(entries)
+}
+
 /// Mnemonic and name of exception `vector`.
 pub fn name(vector: u64) -> (&'static str, &'static str) {
     match vector {
@@ -252,6 +310,32 @@ pub fn name(vector: u64) -> (&'static str, &'static str) {
         29 => ("#VC", "VMM communication exception"),
         30 => ("#SX", "security exception"),
         _ => ("--", "reserved vector"),
+    }
+}
+
+/// Exceptions whose error code is a segment-selector index: #TS, #NP, #SS,
+/// #GP (and #DF, whose code is always zero).
+fn has_selector_error_code(vector: u64) -> bool {
+    matches!(vector, 10..=13)
+}
+
+/// Human-readable selector error code (Intel SDM vol. 3, 6.13).
+#[derive(Debug, Clone, Copy)]
+pub struct SelectorErrorCode(pub u64);
+
+impl fmt::Display for SelectorErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let c = self.0;
+        let index = (c >> 3) & 0x1FFF;
+        match (c >> 1) & 0b11 {
+            0b00 => write!(f, "GDT entry {index}")?,
+            0b10 => write!(f, "LDT entry {index}")?,
+            _ => write!(f, "IDT vector {index}")?,
+        }
+        if c & 1 != 0 {
+            f.write_str(", during delivery of an external event")?;
+        }
+        Ok(())
     }
 }
 
@@ -297,11 +381,15 @@ impl fmt::Display for PageFaultCode {
 /// Called by the entry stubs with interrupts disabled (interrupt gates).
 ///
 /// Must not allocate or wait on locks: it can interrupt any code, including
-/// the allocator. Only the probe fixups return; everything else ends in a
-/// panic.
+/// the allocator. External interrupts (vectors 32 and up) and the probe
+/// fixups return; every other exception ends in a panic.
 #[unsafe(no_mangle)]
 extern "C" fn rust_os_exception_dispatch(frame: &mut ExceptionFrame) {
     let vector = frame.vector as usize;
+    if vector >= super::tables::EXCEPTION_VECTORS {
+        super::interrupts::handle(frame.vector);
+        return;
+    }
     let cr2 = read_cr2();
     if (vector == PAGE_FAULT || vector == GENERAL_PROTECTION) && probe::try_recover(frame, cr2) {
         return;
@@ -321,7 +409,27 @@ fn report_fatal(frame: &ExceptionFrame, cr2: u64) -> ! {
     kprintln!("[rust-os]   error code: {:#x}", frame.error_code);
     if frame.vector as usize == PAGE_FAULT {
         kprintln!("[rust-os]   cause: {}", PageFaultCode(frame.error_code));
+    } else if has_selector_error_code(frame.vector) && frame.error_code != 0 {
+        kprintln!(
+            "[rust-os]   selector: {}",
+            SelectorErrorCode(frame.error_code)
+        );
     }
+    let context = super::interrupts::current_irq();
+    kprintln!(
+        "{} {}; interrupts were {} (RFLAGS.IF); uptime {} ticks",
+        markers::FAULT_CONTEXT,
+        match context {
+            Some(irq) => super::interrupts::irq_name(irq),
+            None => "normal kernel code (not an interrupt handler)",
+        },
+        if frame.rflags & (1 << 9) != 0 {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        crate::time::ticks()
+    );
     if matches!(frame.vector as usize, PAGE_FAULT | DOUBLE_FAULT) {
         kprintln!("{} {:#018x}", markers::FAULT_ADDRESS, cr2);
     }

@@ -49,6 +49,19 @@ pub const MUTED: Rgb = Rgb::new(0x8a, 0x97, 0xb0);
 pub const OK: Rgb = Rgb::new(0x7d, 0xd3, 0x9b);
 /// Status dot: stage degraded or skipped.
 pub const WARN: Rgb = Rgb::new(0xf2, 0xc1, 0x4e);
+/// Input panel surface (darker than the card so the two read as separate).
+pub const PANEL: Rgb = Rgb::new(0x22, 0x2c, 0x43);
+/// Push button at rest.
+pub const BUTTON: Rgb = Rgb::new(0x35, 0x44, 0x63);
+/// Push button with the pointer over it.
+pub const BUTTON_HOVER: Rgb = Rgb::new(0x44, 0x57, 0x7d);
+/// Push button held down.
+pub const BUTTON_PRESSED: Rgb = Rgb::new(0x4f, 0x8c, 0xd9);
+/// Pointer fill. Pure white appears nowhere else, so the smoke test can find
+/// the pointer in a screenshot.
+pub const CURSOR_FILL: Rgb = Rgb::new(0xff, 0xff, 0xff);
+/// Pointer outline.
+pub const CURSOR_OUTLINE: Rgb = Rgb::new(0x0b, 0x0e, 0x14);
 /// Kernel panic banner.
 pub const PANIC_BG: Rgb = Rgb::new(0x8c, 0x1d, 0x2b);
 /// Kernel panic banner text.

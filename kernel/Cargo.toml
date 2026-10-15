@@ -1,6 +1,6 @@
 [package]
 name = "kernel"
-description = "Modular monolithic kernel (x86_64, UEFI via bootloader 0.11): serial diagnostics, exception handling, memory management, framebuffer welcome screen."
+description = "Modular monolithic kernel (x86_64, UEFI via bootloader 0.11): serial diagnostics, exception handling, memory management, 8259/PIT interrupts, PS/2 input, interactive framebuffer screen."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,13 +14,15 @@ bench = false
 
 [features]
 # Fault-test builds used only by `cargo xtask smoke`; never enable them
-# otherwise. Each replaces the final "BOOT OK" with a deliberate failure:
+# otherwise. Each adds a deliberate failure at the end of boot:
 # panic right after the welcome screen is drawn,
 deliberate-panic = []
 # write into an unmapped guard page (page fault),
 deliberate-page-fault = []
 # recurse until the boot stack overflows into its guard page (double fault).
 deliberate-stack-overflow = []
+# fault inside the timer interrupt handler while the event loop runs.
+deliberate-interrupt-fault = []
 
 [dependencies]
 bootloader_api.workspace = true
@@ -28,6 +30,7 @@ os-abi.workspace = true
 gfx.workspace = true
 boot-data.workspace = true
 mm.workspace = true
+input.workspace = true
 
 [lints]
 workspace = true
