@@ -14,10 +14,11 @@ const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const IMAGE_NAME: &str = "rust-os-uefi.img";
 /// Kernel features that turn the kernel into a fault-test build. Each is
 /// built into its own target directory and image, never the normal ones.
-const FAULT_TEST_FEATURES: [&str; 3] = [
+const FAULT_TEST_FEATURES: [&str; 4] = [
     "deliberate-panic",
     "deliberate-page-fault",
     "deliberate-stack-overflow",
+    "deliberate-interrupt-fault",
 ];
 /// Default per-scenario limit for `smoke`, measured from QEMU start.
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -59,7 +60,8 @@ options:
                             smoke: per-scenario limit (default: 120)
   --headless                run: no display window
   --scenario <name>         smoke: boot, panic, no-display, page-fault,
-                            stack-overflow or all (default: all)
+                            stack-overflow, interrupt-fault, input or all
+                            (default: all)
 
 QEMU is `qemu-system-x86_64` from PATH, or RUST_OS_QEMU.
 ";

@@ -9,22 +9,30 @@
 //! - [`probe`]: memory-access probes whose faults the exception handler can
 //!   recover from, used to test guard pages and page permissions.
 //!
+//! [`pic`], [`pit`] and [`interrupts`] use only the port I/O wrappers below.
+//!
 //! | Wrapper | Instruction | Why Rust cannot do it |
 //! | --- | --- | --- |
 //! | [`outb`] / [`inb`] | `out dx, al` / `in al, dx` | x86 port I/O has no memory-mapped form; needed for the 16550 UART |
-//! | [`disable_interrupts`] | `cli` | Masks maskable interrupts; no interrupt controller is programmed yet |
-//! | [`halt_forever`] | `cli; hlt` | Stops the CPU until the next interrupt instead of busy-waiting |
+//! | [`disable_interrupts`] / [`enable_interrupts`] | `cli` / `sti` | Mask or unmask maskable (external) interrupts |
+//! | [`interrupts_enabled`] | `pushfq; pop` | Read RFLAGS.IF |
+//! | [`enable_interrupts_and_wait`] | `sti; hlt` | Sleep until the next interrupt without losing a wake-up |
+//! | [`halt_forever`] | `cli; hlt` | Stops the CPU for good |
 //! | [`read_cr0`] / [`write_cr0`], [`read_cr4`] / [`write_cr4`] | `mov` to/from CR0, CR4 | Control registers (write protection, SMEP/SMAP) |
 //! | [`read_cr2`] | `mov rax, cr2` | Faulting address of the last page fault |
 //! | [`read_cr3`] | `mov rax, cr3` | Physical address of the active PML4 |
 //! | [`read_msr`] / [`write_msr`] | `rdmsr` / `wrmsr` | Model-specific registers (EFER.NXE) |
 //! | [`invalidate_page`] | `invlpg` | Drops a stale TLB entry after a page-table edit |
+//! | [`read_tsc`] | `rdtsc` | Time-stamp counter, the monotonic clock source |
 //! | [`load_gdt`], [`load_idt`], [`load_task_register`], [`reload_segments`] | `lgdt`, `lidt`, `ltr`, far return + `mov` to segment registers | Install the kernel's descriptor tables |
 //!
 //! All of these require CPL 0. The bootloader enters the kernel in ring 0 and
 //! the kernel never leaves it.
 
 pub mod exceptions;
+pub mod interrupts;
+pub mod pic;
+pub mod pit;
 pub mod probe;
 pub mod tables;
 
@@ -63,17 +71,69 @@ pub unsafe fn inb(port: u16) -> u8 {
 
 /// Mask maskable interrupts (clear RFLAGS.IF).
 ///
-/// No interrupt controller is programmed and the IDT only covers CPU
-/// exceptions, so an external interrupt would be fatal. Calling this at
-/// entry and in the panic handler keeps that from happening regardless of how
-/// the bootloader left the flag. CPU exceptions are not maskable and are
-/// handled by [`exceptions`].
+/// Called at entry (before the interrupt controller is programmed, whatever
+/// the bootloader left in the flag) and in the panic handler. CPU exceptions
+/// are not maskable and are handled by [`exceptions`].
+///
+/// Not `nomem`: this is a compiler barrier, so memory accesses meant to be
+/// inside an interrupt-free section are not moved out of it.
 pub fn disable_interrupts() {
     // SAFETY: `cli` is permitted at CPL 0, where the kernel runs. It only
-    // changes RFLAGS.IF, which no Rust code relies on, and touches no memory.
+    // changes RFLAGS.IF and touches no memory.
     unsafe {
-        asm!("cli", options(nomem, nostack));
+        asm!("cli", options(nostack));
     }
+}
+
+/// Unmask maskable interrupts (set RFLAGS.IF).
+///
+/// Only call this once the IDT has a gate for every vector the programmed
+/// interrupt controller can deliver ([`tables::init`] covers all 256) and
+/// the controller is set up ([`pic::init`]). Not `nomem`, for the same
+/// reason as [`disable_interrupts`].
+pub fn enable_interrupts() {
+    // SAFETY: `sti` is permitted at CPL 0. Every vector has a gate whose
+    // stub saves and restores all registers it uses (see `exceptions`), so
+    // interrupted code observes no change except time passing.
+    unsafe {
+        asm!("sti", options(nostack));
+    }
+}
+
+/// Whether maskable interrupts are currently enabled (RFLAGS.IF).
+pub fn interrupts_enabled() -> bool {
+    let flags: u64;
+    // SAFETY: `pushfq; pop` reads RFLAGS through the stack slot it pushes
+    // and pops again, leaving RSP unchanged. The kernel target has no red
+    // zone, so the push cannot clobber live data below RSP.
+    unsafe {
+        asm!("pushfq", "pop {}", out(reg) flags, options(nomem, preserves_flags));
+    }
+    flags & (1 << 9) != 0
+}
+
+/// Enable interrupts and halt until one arrives; returns with interrupts
+/// enabled.
+///
+/// Call with interrupts *disabled* after checking that no work is pending.
+/// `sti` takes effect only after the following instruction, so an interrupt
+/// that became pending after the check is delivered after `hlt` starts and
+/// wakes it: no wake-up is lost between the check and the halt.
+pub fn enable_interrupts_and_wait() {
+    // SAFETY: as in `enable_interrupts`; `hlt` only pauses the CPU until the
+    // next interrupt. Not `nomem`: handlers run in between and may change
+    // memory the caller reads afterwards.
+    unsafe {
+        asm!("sti", "hlt", options(nostack));
+    }
+}
+
+/// Wait roughly a microsecond by writing to the unused POST-code port 0x80; used
+/// between commands to slow legacy devices (8259 PIC).
+pub fn io_wait() {
+    // SAFETY: port 0x80 is the POST diagnostic port; nothing in the kernel
+    // or on the q35 machine depends on its value.
+    unsafe { outb(0x80, 0) };
 }
 
 /// Halt the CPU permanently.
@@ -188,6 +248,18 @@ pub fn invalidate_page(addr: u64) {
     // translations. Not `nomem`: memory accesses after it must see the new
     // mapping, so the compiler must not reorder them across it.
     unsafe { asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) };
+}
+
+/// Read the time-stamp counter.
+pub fn read_tsc() -> u64 {
+    let (low, high): (u32, u32);
+    // SAFETY: `rdtsc` is available on every x86_64 CPU and permitted at
+    // CPL 0 (CR4.TSD only restricts ring 3); it reads a counter and touches
+    // no memory.
+    unsafe {
+        asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
+    }
+    (u64::from(high) << 32) | u64::from(low)
 }
 
 /// Operand of `lgdt` / `lidt`.

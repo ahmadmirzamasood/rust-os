@@ -6,6 +6,10 @@
 //! or failure signal or the timeout. Where the scenario draws, it then takes
 //! a QMP `screendump` and checks the pixels against the colours the kernel
 //! uses (which also catches red/blue swaps), and saves a PNG.
+//!
+//! The `input` scenario then drives the guest's PS/2 keyboard and mouse with
+//! QMP `input-send-event` (see [`interact`]) and checks the kernel's serial
+//! event log and a second screenshot.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -14,7 +18,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use boot_data::markers;
-use gfx::{Rgb, screens::count_color, theme};
+use gfx::{Rgb, cursor, screens::count_color, theme};
 
 use crate::picture::{self, RgbImage};
 use crate::qemu::{self, Firmware};
@@ -36,15 +40,24 @@ pub enum Scenario {
     /// into its guard page; the double fault is handled on its own stack
     /// and reported as a boot-stack overflow.
     StackOverflow,
+    /// Image built with `deliberate-interrupt-fault`: the timer interrupt
+    /// handler writes into a guard page while the event loop runs; the
+    /// report names the IRQ 0 handler as the context.
+    InterruptFault,
+    /// Normal image, then keyboard and mouse input through QMP: key events,
+    /// pointer movement, button clicks, bursts, and the timer heartbeat.
+    Input,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 5] = [
+    pub const ALL: [Scenario; 7] = [
         Self::Boot,
         Self::Panic,
         Self::NoDisplay,
         Self::PageFault,
         Self::StackOverflow,
+        Self::InterruptFault,
+        Self::Input,
     ];
 
     pub fn parse(name: &str) -> Result<Vec<Scenario>, String> {
@@ -58,7 +71,7 @@ impl Scenario {
             .ok_or_else(|| {
                 format!(
                     "unknown scenario `{name}` (expected boot, panic, no-display, page-fault, \
-                     stack-overflow or all)"
+                     stack-overflow, interrupt-fault, input or all)"
                 )
             })
     }
@@ -70,22 +83,28 @@ impl Scenario {
             Self::NoDisplay => "no-display",
             Self::PageFault => "page-fault",
             Self::StackOverflow => "stack-overflow",
+            Self::InterruptFault => "interrupt-fault",
+            Self::Input => "input",
         }
     }
 
     /// Kernel feature of the fault-test build this scenario boots, if any.
     pub const fn kernel_feature(self) -> Option<&'static str> {
         match self {
-            Self::Boot | Self::NoDisplay => None,
+            Self::Boot | Self::NoDisplay | Self::Input => None,
             Self::Panic => Some("deliberate-panic"),
             Self::PageFault => Some("deliberate-page-fault"),
             Self::StackOverflow => Some("deliberate-stack-overflow"),
+            Self::InterruptFault => Some("deliberate-interrupt-fault"),
         }
     }
 
     /// Whether the scenario ends with the on-screen panic banner.
     const fn expects_banner(self) -> bool {
-        matches!(self, Self::Panic | Self::PageFault | Self::StackOverflow)
+        matches!(
+            self,
+            Self::Panic | Self::PageFault | Self::StackOverflow | Self::InterruptFault
+        )
     }
 
     /// Judge the serial log so far.
@@ -99,17 +118,27 @@ impl Scenario {
         if log.contains(markers::MEMORY_INIT_FAILED) {
             return Verdict::Fail("memory management failed to initialize".into());
         }
+        if log.contains(markers::INPUT_SELFTEST_FAIL) {
+            return Verdict::Fail("interrupt/input self-test failed".into());
+        }
+        if log.contains(markers::INTERRUPTS_FAILED) {
+            return Verdict::Fail("interrupts could not be enabled".into());
+        }
         match self {
-            Self::Boot => {
+            Self::Boot | Self::Input => {
                 if log.contains(markers::PANIC) || log.contains(markers::CPU_EXCEPTION) {
                     Verdict::Fail("kernel panicked or took a CPU exception".into())
                 } else if log.contains(markers::BOOT_DEGRADED) {
                     Verdict::Fail("kernel reported BOOT DEGRADED".into())
                 } else if log.contains(markers::BOOT_OK) {
-                    if log.contains(markers::MEMORY_SELFTEST_PASS) {
-                        Verdict::Pass
-                    } else {
+                    if !log.contains(markers::MEMORY_SELFTEST_PASS) {
                         Verdict::Fail("BOOT OK without a memory self-test pass".into())
+                    } else if !log.contains(markers::INPUT_SELFTEST_PASS) {
+                        Verdict::Fail("BOOT OK without an input self-test pass".into())
+                    } else if !log.contains(markers::UI_READY) {
+                        Verdict::Fail("BOOT OK without the interactive screen".into())
+                    } else {
+                        Verdict::Pass
                     }
                 } else {
                     Verdict::Pending
@@ -149,8 +178,10 @@ impl Scenario {
                     ],
                 )
             }
-            Self::PageFault | Self::StackOverflow => {
-                if log.contains(markers::BOOT_OK) || log.contains(markers::BOOT_DEGRADED) {
+            Self::PageFault | Self::StackOverflow | Self::InterruptFault => {
+                if self != Self::InterruptFault
+                    && (log.contains(markers::BOOT_OK) || log.contains(markers::BOOT_DEGRADED))
+                {
                     return Verdict::Fail("kernel finished booting instead of faulting".into());
                 }
                 let Some(report) = complete_panic_report(log) else {
@@ -171,6 +202,16 @@ impl Scenario {
                         ("page not present, write, kernel mode", "decoded error code"),
                         (markers::FAULT_ADDRESS, "faulting address"),
                         (markers::DOUBLE_FAULT_STACK_GUARD, "guard-page diagnosis"),
+                        ("context: normal kernel code", "interrupted context"),
+                    ]
+                } else if self == Self::InterruptFault {
+                    &[
+                        ("page fault (#PF)", "page-fault report"),
+                        ("page not present, write, kernel mode", "decoded error code"),
+                        (markers::FAULT_ADDRESS, "faulting address"),
+                        (markers::DOUBLE_FAULT_STACK_GUARD, "guard-page diagnosis"),
+                        (markers::TIMER_IRQ_CONTEXT, "timer-interrupt context"),
+                        ("interrupts were disabled", "interrupt flag in the handler"),
                     ]
                 } else {
                     &[
@@ -183,7 +224,12 @@ impl Scenario {
                     Verdict::Pass => {}
                     other => return other,
                 }
-                if self == Self::PageFault && !fault_address_matches(log) {
+                if self == Self::InterruptFault && !log.contains(markers::INPUT_SELFTEST_PASS) {
+                    return Verdict::Fail("fault happened before interrupts were verified".into());
+                }
+                if matches!(self, Self::PageFault | Self::InterruptFault)
+                    && !fault_address_matches(log)
+                {
                     return Verdict::Fail("reported CR2 differs from the address written".into());
                 }
                 require(
@@ -328,10 +374,34 @@ pub fn run(scenario: Scenario, image: &Path, setup: &Setup) -> Result<String, St
         elapsed.as_secs_f64(),
         serial_log.display()
     );
+    let mut input = None;
+    if scenario == Scenario::Input {
+        let deadline = started + setup.timeout;
+        match interact(&mut vm, &serial_log, deadline) {
+            Ok(report) => {
+                summary = format!(
+                    "[smoke:input] PASS in {:.1} s (serial log: {})\n{}",
+                    started.elapsed().as_secs_f64(),
+                    serial_log.display(),
+                    report.summary
+                );
+                input = Some(report);
+            }
+            Err(err) => {
+                vm.quit();
+                return Err(format!(
+                    "[smoke:input] FAIL: {err}\n--- serial log tail ({}) ---\n{}",
+                    serial_log.display(),
+                    tail(&read_lossy(&serial_log), 30)
+                ));
+            }
+        }
+    }
+    let log = read_lossy(&serial_log);
     if scenario != Scenario::NoDisplay {
         let result = vm
             .screendump(&screen_ppm)
-            .and_then(|image| check_screen(scenario, &image, &log).map(|()| image))
+            .and_then(|image| check_screen(scenario, &image, &log, input.as_ref()).map(|()| image))
             .and_then(|image| picture::save_png(&image, &screen_png).map(|()| image));
         match result {
             Ok(image) => {
@@ -355,7 +425,12 @@ pub fn run(scenario: Scenario, image: &Path, setup: &Setup) -> Result<String, St
 }
 
 /// Check the screendump against what the kernel should have drawn.
-fn check_screen(scenario: Scenario, image: &RgbImage, log: &str) -> Result<(), String> {
+fn check_screen(
+    scenario: Scenario,
+    image: &RgbImage,
+    log: &str,
+    input: Option<&InputReport>,
+) -> Result<(), String> {
     let (width, height) = framebuffer_size(log).ok_or("serial log has no framebuffer line")?;
     if (image.width, image.height) != (width, height) {
         return Err(format!(
@@ -389,8 +464,481 @@ fn check_screen(scenario: Scenario, image: &RgbImage, log: &str) -> Result<(), S
     if scenario.expects_banner() {
         expect_pixel(1, height - 1, theme::PANIC_BG, "panic banner")?;
         expect_count(theme::PANIC_TEXT, 200, "panic text")?;
+        return Ok(());
+    }
+    expect_count(theme::PANEL, 50_000, "input panel")?;
+    // The pointer is the only pure-white shape on screen: all of its fill
+    // pixels must be visible, and only inside the arrow's box at the
+    // pointer position.
+    let pointer = match input {
+        Some(report) => report.pointer,
+        None => ui_ready(log)
+            .map(|ready| ready.pointer)
+            .ok_or("serial log has no ui-ready line")?,
+    };
+    let fill = cursor::fill_pixels();
+    let found = count_color(&image.pixels, theme::CURSOR_FILL);
+    if found != fill {
+        return Err(format!(
+            "{found} pointer fill pixels on screen, expected {fill}"
+        ));
+    }
+    let bounds = cursor::bounds(pointer.0 as i32, pointer.1 as i32);
+    let mut inside = 0;
+    for dy in 0..bounds.h as usize {
+        for dx in 0..bounds.w as usize {
+            let (x, y) = (pointer.0 as usize + dx, pointer.1 as usize + dy);
+            let fill = theme::CURSOR_FILL;
+            if image.pixel(x, y) == Some([fill.r, fill.g, fill.b]) {
+                inside += 1;
+            }
+        }
+    }
+    if inside != fill {
+        return Err(format!(
+            "pointer not drawn at {},{}: {inside} of {fill} fill pixels there",
+            pointer.0, pointer.1
+        ));
+    }
+    if input.is_some() {
+        // Pointer rests on the button after the last click: hover colour.
+        expect_count(theme::BUTTON_HOVER, 3000, "hovered button")?;
+    } else {
+        expect_count(theme::BUTTON, 3000, "button")?;
     }
     Ok(())
+}
+
+/// Geometry the kernel reports once the interactive screen is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UiReady {
+    /// x, y, width, height of the test button.
+    button: (i64, i64, i64, i64),
+    pointer: (i64, i64),
+}
+
+/// All integers (optionally negative) in `text`, in order.
+fn integers(text: &str) -> Vec<i64> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_digit() || (c == '-' && current.is_empty()) {
+            current.push(c);
+        } else {
+            if let Ok(n) = current.parse() {
+                out.push(n);
+            }
+            current.clear();
+        }
+    }
+    out
+}
+
+/// Parse the `ui: ready; button at X,Y WxH; pointer at X,Y` line.
+fn ui_ready(log: &str) -> Option<UiReady> {
+    let line = log.lines().find(|l| l.starts_with(markers::UI_READY))?;
+    let n = integers(&line[markers::UI_READY.len()..]);
+    match n[..] {
+        [x, y, w, h, px, py, ..] => Some(UiReady {
+            button: (x, y, w, h),
+            pointer: (px, py),
+        }),
+        _ => None,
+    }
+}
+
+/// What the input scenario established, for the screenshot check.
+#[derive(Debug)]
+struct InputReport {
+    /// Where the pointer ended up.
+    pointer: (i64, i64),
+    summary: String,
+}
+
+/// Reads the serial log and remembers when each timer heartbeat line first
+/// appeared, to compare guest uptime with host time.
+struct Watcher<'a> {
+    path: &'a Path,
+    deadline: Instant,
+    /// (uptime seconds, first seen); `None` if present at the first look.
+    heartbeats: Vec<(u64, Option<Instant>)>,
+}
+
+impl<'a> Watcher<'a> {
+    fn new(path: &'a Path, deadline: Instant) -> Self {
+        let mut watcher = Self {
+            path,
+            deadline,
+            heartbeats: Vec::new(),
+        };
+        let log = read_lossy(path);
+        for s in heartbeat_seconds(&log) {
+            watcher.heartbeats.push((s, None));
+        }
+        watcher
+    }
+
+    fn read(&mut self) -> String {
+        let log = read_lossy(self.path);
+        let now = Instant::now();
+        for s in heartbeat_seconds(&log) {
+            if !self.heartbeats.iter().any(|(seen, _)| *seen == s) {
+                self.heartbeats.push((s, Some(now)));
+            }
+        }
+        log
+    }
+
+    /// Poll until `done(log)` holds; fail on a kernel panic or exception,
+    /// or after `limit` (bounded by the scenario deadline).
+    fn wait(
+        &mut self,
+        what: &str,
+        limit: Duration,
+        done: impl Fn(&str) -> bool,
+    ) -> Result<String, String> {
+        let until = self.deadline.min(Instant::now() + limit);
+        loop {
+            let log = self.read();
+            if log.contains(markers::PANIC) || log.contains(markers::CPU_EXCEPTION) {
+                return Err(format!("kernel panicked while waiting for {what}"));
+            }
+            if done(&log) {
+                return Ok(log);
+            }
+            if Instant::now() >= until {
+                return Err(format!("timed out waiting for {what}"));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn last_heartbeat(&self) -> u64 {
+        self.heartbeats.iter().map(|(s, _)| *s).max().unwrap_or(0)
+    }
+}
+
+/// Uptime seconds of every heartbeat line in `log`.
+fn heartbeat_seconds(log: &str) -> Vec<u64> {
+    log.lines()
+        .filter_map(|l| l.strip_prefix(markers::TIMER_HEARTBEAT))
+        .filter_map(|rest| rest.split_whitespace().next()?.parse().ok())
+        .collect()
+}
+
+/// Whether `needles` occur in `log`, in this order, after byte `from`.
+fn in_order(log: &str, from: usize, needles: &[String]) -> bool {
+    let mut at = from.min(log.len());
+    for needle in needles {
+        match log[at..].find(needle.as_str()) {
+            Some(i) => at += i + needle.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
+fn key_event(qcode: &str, down: bool) -> String {
+    format!(
+        r#"{{"type":"key","data":{{"down":{down},"key":{{"type":"qcode","data":"{qcode}"}}}}}}"#
+    )
+}
+
+fn rel_event(axis: &str, value: i64) -> String {
+    format!(r#"{{"type":"rel","data":{{"axis":"{axis}","value":{value}}}}}"#)
+}
+
+fn button_event(button: &str, down: bool) -> String {
+    format!(r#"{{"type":"btn","data":{{"down":{down},"button":"{button}"}}}}"#)
+}
+
+/// Move the pointer by (`dx`, `dy`) in steps of at most 255 counts per
+/// axis, one QMP command per step with a short pause.
+///
+/// QEMU's PS/2 mouse only emits packets (each at most -256..=255 per axis)
+/// while its small output queue has room and keeps any remaining motion
+/// until the *next* input event, so one large relative event would leave
+/// most of the motion pending. Small steps let the guest drain the queue.
+fn move_pointer(vm: &mut Vm, dx: i64, dy: i64) -> Result<(), String> {
+    let (mut left_x, mut left_y) = (dx, dy);
+    while left_x != 0 || left_y != 0 {
+        let step_x = left_x.clamp(-255, 255);
+        let step_y = left_y.clamp(-255, 255);
+        send_events(vm, &[rel_event("x", step_x), rel_event("y", step_y)])?;
+        left_x -= step_x;
+        left_y -= step_y;
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    Ok(())
+}
+
+fn send_events(vm: &mut Vm, events: &[String]) -> Result<(), String> {
+    vm.negotiate()?;
+    vm.execute(
+        &format!(
+            r#"{{"execute":"input-send-event","arguments":{{"events":[{}]}}}}"#,
+            events.join(",")
+        ),
+        Duration::from_secs(10),
+    )
+    .map(|_| ())
+}
+
+/// Drive the guest's PS/2 devices through QMP and check its serial log:
+///
+/// 1. key presses and releases (plain, shifted, extended) are logged in
+///    order with the right scancodes and characters;
+/// 2. the pointer can be pinned to (0,0) and moved exactly onto the test
+///    button, and a left click there is counted;
+/// 3. after bursts of keyboard and mouse events, the system still responds
+///    to a sentinel key and a second click;
+/// 4. with the event loop stalled (F9), the kernel's byte rings really
+///    overflow, and afterwards input works again (sentinel, third click);
+/// 5. the timer heartbeat keeps running and tracks host time.
+fn interact(vm: &mut Vm, serial_log: &Path, deadline: Instant) -> Result<InputReport, String> {
+    let mut w = Watcher::new(serial_log, deadline);
+    let log = w.read();
+    let ready = ui_ready(&log).ok_or("serial log has no parsable ui-ready line")?;
+    let (screen_w, screen_h) =
+        framebuffer_size(&log).ok_or("serial log has no framebuffer line")?;
+    let pin = -(screen_w.max(screen_h) as i64 + 64);
+    let (bx, by, bw, bh) = ready.button;
+    let target = (bx + bw / 2, by + bh / 2);
+    let line = |s: &str| s.to_string();
+    let mut report = Vec::new();
+
+    // 1. Keys.
+    let from = w.read().len();
+    send_events(
+        vm,
+        &[
+            key_event("a", true),
+            key_event("a", false),
+            key_event("shift", true),
+            key_event("b", true),
+            key_event("b", false),
+            key_event("shift", false),
+            key_event("up", true),
+            key_event("up", false),
+        ],
+    )?;
+    let expected: Vec<String> = [
+        "key press A (scancode 0x1e) char 'a'",
+        "key release A (scancode 0x1e)",
+        "key press LShift (scancode 0x2a)",
+        "key press B (scancode 0x30) char 'B'",
+        "key release B (scancode 0x30)",
+        "key release LShift (scancode 0x2a)",
+        "key press Up (scancode 0xe048)",
+        "key release Up (scancode 0xe048)",
+    ]
+    .map(|s| format!("{} {}", markers::INPUT_KEY, &s["key ".len()..]))
+    .to_vec();
+    w.wait("8 key events in order", Duration::from_secs(20), |log| {
+        in_order(log, from, &expected)
+    })?;
+    report.push(line(
+        "keys: a, Shift+b, Up decoded in order with scancodes and characters",
+    ));
+
+    // 2. Pointer: pin to the corner, sync with a right click, move onto the
+    //    button, left click.
+    let click = |vm: &mut Vm, button: &str| -> Result<(), String> {
+        send_events(vm, &[button_event(button, true)])?;
+        std::thread::sleep(Duration::from_millis(50));
+        send_events(vm, &[button_event(button, false)])
+    };
+    let pin_and_click = |vm: &mut Vm, w: &mut Watcher<'_>, round: usize| -> Result<(), String> {
+        let corner = format!("{} right down at 0,0", markers::INPUT_MOUSE_BUTTON);
+        move_pointer(vm, pin, pin)?;
+        click(vm, "right")?;
+        w.wait("pointer pinned at 0,0", Duration::from_secs(20), |log| {
+            log.matches(corner.as_str()).count() >= round
+        })?;
+        move_pointer(vm, target.0, target.1)?;
+        click(vm, "left")?;
+        let down = format!(
+            "{} left down at {},{}",
+            markers::INPUT_MOUSE_BUTTON,
+            target.0,
+            target.1
+        );
+        let up = format!(
+            "{} left up at {},{}",
+            markers::INPUT_MOUSE_BUTTON,
+            target.0,
+            target.1
+        );
+        let clicked = format!(
+            "{} ({round}) at {},{}",
+            markers::UI_CLICK,
+            target.0,
+            target.1
+        );
+        w.wait(
+            &format!(
+                "click {round} on the test button at {},{}",
+                target.0, target.1
+            ),
+            Duration::from_secs(20),
+            |log| {
+                log.matches(down.as_str()).count() >= round
+                    && log.matches(up.as_str()).count() >= round
+                    && log.contains(clicked.as_str())
+            },
+        )?;
+        Ok(())
+    };
+    pin_and_click(vm, &mut w, 1)?;
+    report.push(format!(
+        "pointer: pinned at 0,0, moved exactly to {},{}, click counted on the button",
+        target.0, target.1
+    ));
+
+    // 3. Bursts, then a sentinel key and a second click.
+    let before = w.read();
+    let x_before = before.matches("key press X").count();
+    let heartbeat_before = w.last_heartbeat();
+    for _ in 0..3 {
+        let keys: Vec<String> = (0..40).map(|i| key_event("x", i % 2 == 0)).collect();
+        send_events(vm, &keys)?;
+    }
+    for _ in 0..3 {
+        let moves: Vec<String> = (0..60)
+            .flat_map(|i| {
+                let sign = if i % 2 == 0 { 1 } else { -1 };
+                [rel_event("x", 7 * sign), rel_event("y", 5 * sign)]
+            })
+            .collect();
+        send_events(vm, &moves)?;
+    }
+    let from = w.read().len();
+    send_events(vm, &[key_event("z", true), key_event("z", false)])?;
+    let sentinel = [
+        format!("{} press Z (scancode 0x2c)", markers::INPUT_KEY),
+        format!("{} release Z (scancode 0x2c)", markers::INPUT_KEY),
+    ];
+    w.wait(
+        "sentinel key after the burst",
+        Duration::from_secs(30),
+        |log| in_order(log, from, &sentinel),
+    )?;
+    pin_and_click(vm, &mut w, 2)?;
+    let after = w.read();
+    let x_received = after.matches("key press X").count() - x_before;
+    report.push(format!(
+        "QEMU-paced burst: 60 key presses sent, {x_received} decoded (the rest dropped by \
+         QEMU's own PS/2 queue), 360 motion events; responsive afterwards"
+    ));
+
+    // 4. Real overflow of the kernel's rings: F9 stalls the event loop while
+    //    interrupts keep filling the rings; then the system must recover.
+    send_events(vm, &[key_event("f9", true), key_event("f9", false)])?;
+    w.wait(
+        "the event-loop stall (F9)",
+        Duration::from_secs(20),
+        |log| log.contains(markers::STALL_BEGIN),
+    )?;
+    let stall_started = Instant::now();
+    // Each command is one mouse packet (3 bytes): 200 of them exceed the
+    // 512-byte mouse ring. Keys go in small commands, because QEMU's own
+    // queue drops what does not fit: 30 x 12 bytes exceed the 256-byte
+    // keyboard ring. Mouse first: it needs the most commands.
+    for i in 0..200 {
+        let sign = if i % 2 == 0 { 1 } else { -1 };
+        send_events(vm, &[rel_event("x", 3 * sign), rel_event("y", 2 * sign)])?;
+    }
+    for i in 0..30 {
+        let keys: Vec<String> = (0..12)
+            .map(|j| key_event(if i % 2 == 0 { "c" } else { "v" }, j % 2 == 0))
+            .collect();
+        send_events(vm, &keys)?;
+    }
+    let sending = stall_started.elapsed();
+    let log = w.wait("the end of the stall", Duration::from_secs(30), |log| {
+        log.contains(markers::STALL_END)
+    })?;
+    let end_line = log
+        .lines()
+        .find(|l| l.starts_with(markers::STALL_END))
+        .unwrap_or_default()
+        .to_string();
+    let n = integers(&end_line[markers::STALL_END.len()..]);
+    let [_, _, kbd_lost, _, _, mouse_lost, ..] = n[..] else {
+        return Err(format!("cannot parse stall line: {end_line}"));
+    };
+    if kbd_lost == 0 || mouse_lost == 0 {
+        return Err(format!(
+            "rings did not overflow during the stall (sending took {:.1} s): {end_line}",
+            sending.as_secs_f64()
+        ));
+    }
+    // Input sent while the rings are still full is dropped by design, so
+    // wait until the kernel reports the backlog decoded.
+    w.wait(
+        "the post-stall backlog to drain",
+        Duration::from_secs(30),
+        |log| log.contains(markers::STALL_DRAINED),
+    )?;
+    let from = w.read().len();
+    send_events(vm, &[key_event("z", true), key_event("z", false)])?;
+    w.wait(
+        "sentinel key after the overflow",
+        Duration::from_secs(30),
+        |log| in_order(log, from, &sentinel),
+    )?;
+    pin_and_click(vm, &mut w, 3)?;
+    report.push(format!(
+        "overflow: during an 8 s stall the kernel rings dropped {kbd_lost} keyboard and \
+         {mouse_lost} mouse bytes as designed; decoders resynchronized, sentinel key and \
+         third click work"
+    ));
+
+    // 5. The timer keeps running after the bursts and tracks host time.
+    let next = heartbeat_before.max(w.last_heartbeat()) + 1;
+    let log = w.wait(
+        "a timer heartbeat after the burst",
+        Duration::from_secs(25),
+        |log| heartbeat_seconds(log).iter().any(|&s| s >= next),
+    )?;
+    let timed: Vec<(u64, Instant)> = w
+        .heartbeats
+        .iter()
+        .filter_map(|&(s, t)| Some((s, t?)))
+        .collect();
+    if let (Some(first), Some(last)) = (timed.first(), timed.last())
+        && last.0 > first.0
+    {
+        let guest = (last.0 - first.0) as f64;
+        let host = last.1.duration_since(first.1).as_secs_f64();
+        let ratio = host / guest;
+        if !(0.5..=2.0).contains(&ratio) {
+            return Err(format!(
+                "guest uptime {guest} s took {host:.2} s of host time (ratio {ratio:.2})"
+            ));
+        }
+        report.push(format!(
+            "timer: heartbeats {}..{} s observed over {host:.2} s host time (ratio {ratio:.2})",
+            first.0, last.0
+        ));
+    } else {
+        return Err("fewer than two heartbeat lines observed during the run".into());
+    }
+    if let Some(last) = log
+        .lines()
+        .rev()
+        .find(|l| l.starts_with(markers::TIMER_HEARTBEAT))
+    {
+        report.push(format!("last heartbeat: {last}"));
+    }
+    Ok(InputReport {
+        pointer: target,
+        summary: report
+            .iter()
+            .map(|r| format!("[smoke:input]   {r}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    })
 }
 
 /// Parse `<width>x<height>` after the framebuffer marker.
@@ -551,13 +1099,22 @@ mod tests {
     #[test]
     fn boot_scenario_verdicts() {
         assert_eq!(Scenario::Boot.judge(""), Verdict::Pending);
-        assert_eq!(
-            Scenario::Boot.judge(&format!(
-                "{ENTERED}{} (5 checks)\n[rust-os] BOOT OK: done\n",
-                markers::MEMORY_SELFTEST_PASS
-            )),
-            Verdict::Pass
+        let good = format!(
+            "{ENTERED}{} (5 checks)\n{} (17 checks)\n{} button at 1,2 3x4; pointer at 5,6\n\
+             [rust-os] BOOT OK: done\n",
+            markers::MEMORY_SELFTEST_PASS,
+            markers::INPUT_SELFTEST_PASS,
+            markers::UI_READY
         );
+        assert_eq!(Scenario::Boot.judge(&good), Verdict::Pass);
+        assert_eq!(Scenario::Input.judge(&good), Verdict::Pass);
+        // Input self-test missing or failed.
+        let no_input = good.replace(markers::INPUT_SELFTEST_PASS, "x");
+        assert!(matches!(Scenario::Boot.judge(&no_input), Verdict::Fail(_)));
+        let failed = format!("{good}{} (1 of 17)\n", markers::INPUT_SELFTEST_FAIL);
+        assert!(matches!(Scenario::Boot.judge(&failed), Verdict::Fail(_)));
+        let no_ui = good.replace(markers::UI_READY, "x");
+        assert!(matches!(Scenario::Boot.judge(&no_ui), Verdict::Fail(_)));
         assert!(matches!(
             Scenario::Boot.judge(&format!("{ENTERED}[rust-os] KERNEL PANIC\n")),
             Verdict::Fail(_)
@@ -624,13 +1181,21 @@ mod tests {
     #[test]
     fn page_fault_scenario_checks_report_and_address() {
         let details = format!(
-            "[rust-os]   cause: page not present, write, kernel mode\n{} 0xffff804000000010\n{} {}",
+            "[rust-os]   cause: page not present, write, kernel mode\n\
+             {} normal kernel code (not an interrupt handler); interrupts were enabled\n\
+             {} 0xffff804000000010\n{} {}",
+            markers::FAULT_CONTEXT,
             markers::FAULT_ADDRESS,
             markers::FAULT_DIAGNOSIS,
             markers::DOUBLE_FAULT_STACK_GUARD
         );
         let good = fault_log("page fault (#PF), vector 14", &details);
         assert_eq!(Scenario::PageFault.judge(&good), Verdict::Pass);
+        // The same fault from normal code is not the interrupt-fault case.
+        assert!(matches!(
+            Scenario::InterruptFault.judge(&good),
+            Verdict::Fail(_)
+        ));
         let wrong_address = good.replace(
             "0xffff804000000010\n[rust-os]   diag",
             "0xffff804000000018\n[rust-os]   diag",
@@ -703,6 +1268,92 @@ mod tests {
     #[test]
     fn json_strings_are_escaped() {
         assert_eq!(json_string(r#"C:\a "b""#), r#""C:\\a \"b\"""#);
+    }
+
+    #[test]
+    fn interrupt_fault_scenario_needs_timer_context() {
+        let details = format!(
+            "[rust-os]   cause: page not present, write, kernel mode\n\
+             {} {}; interrupts were disabled (RFLAGS.IF); uptime 9 ticks\n\
+             {} 0xffff804000000010\n{} {}",
+            markers::FAULT_CONTEXT,
+            markers::TIMER_IRQ_CONTEXT,
+            markers::FAULT_ADDRESS,
+            markers::FAULT_DIAGNOSIS,
+            markers::DOUBLE_FAULT_STACK_GUARD
+        );
+        let without_selftest = fault_log("page fault (#PF), vector 14", &details);
+        // BOOT OK before the fault is fine here (it fires from the event loop).
+        let good = without_selftest.replacen(
+            "\n",
+            &format!(
+                "\n{} (17 checks)\n{}: x\n",
+                markers::INPUT_SELFTEST_PASS,
+                markers::BOOT_OK
+            ),
+            1,
+        );
+        assert_eq!(Scenario::InterruptFault.judge(&good), Verdict::Pass);
+        assert!(matches!(
+            Scenario::InterruptFault.judge(&without_selftest),
+            Verdict::Fail(_)
+        ));
+        let enabled = good.replace("interrupts were disabled", "interrupts were enabled");
+        assert!(matches!(
+            Scenario::InterruptFault.judge(&enabled),
+            Verdict::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn parses_ui_ready_and_integers() {
+        assert_eq!(integers("a -3,4 x12y 7x8;"), vec![-3, 4, 12, 7, 8]);
+        let log = format!(
+            "x\n{} button at 280,724 180x32; pointer at 639,399\n",
+            markers::UI_READY
+        );
+        assert_eq!(
+            ui_ready(&log),
+            Some(UiReady {
+                button: (280, 724, 180, 32),
+                pointer: (639, 399),
+            })
+        );
+        assert_eq!(
+            ui_ready(&format!("{} button at 1,2", markers::UI_READY)),
+            None
+        );
+    }
+
+    #[test]
+    fn heartbeats_and_ordered_matching() {
+        let log = format!(
+            "{h} 1 s (TSC clock)\nnoise\n{h} 10 s (TSC clock)\n",
+            h = markers::TIMER_HEARTBEAT
+        );
+        assert_eq!(heartbeat_seconds(&log), vec![1, 10]);
+        let needles = ["b".to_string(), "d".to_string()];
+        assert!(in_order("abcde", 0, &needles));
+        assert!(!in_order("adcbe", 0, &needles), "d must follow b");
+        assert!(!in_order("dcba", 0, &needles));
+        assert!(!in_order("abcde", 2, &needles), "search starts at `from`");
+        assert!(in_order("abcde", 99, &[]));
+    }
+
+    #[test]
+    fn qmp_input_events_are_well_formed() {
+        assert_eq!(
+            key_event("a", true),
+            r#"{"type":"key","data":{"down":true,"key":{"type":"qcode","data":"a"}}}"#
+        );
+        assert_eq!(
+            rel_event("x", -5),
+            r#"{"type":"rel","data":{"axis":"x","value":-5}}"#
+        );
+        assert_eq!(
+            button_event("left", false),
+            r#"{"type":"btn","data":{"down":false,"button":"left"}}"#
+        );
     }
 
     #[test]

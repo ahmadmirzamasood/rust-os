@@ -1,4 +1,5 @@
-//! Minimal synchronization for a single-CPU kernel without interrupts.
+//! Minimal synchronization for a single-CPU kernel whose interrupt handlers
+//! never take locks (see `arch::x86_64::interrupts`).
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
@@ -6,10 +7,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 /// A lock that can only be *tried*.
 ///
-/// With one CPU and interrupts masked, a lock that is already held can never
-/// be released by someone else while we wait, so spinning would deadlock.
-/// The only way to find it held is re-entry from the panic handler while the
-/// holder was mid-operation; callers then skip the work instead.
+/// With one CPU, a lock that is already held can never be released by
+/// someone else while we wait, so spinning would deadlock. Interrupt
+/// handlers never take these locks, so the only way to find one held is
+/// re-entry from the panic handler (or a fatal exception) while the holder
+/// was mid-operation; callers then skip the work instead.
 #[derive(Debug)]
 pub struct TryLock<T> {
     locked: AtomicBool,
