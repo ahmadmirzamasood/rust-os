@@ -3,9 +3,9 @@
 //! Two sources, for two jobs:
 //!
 //! - **Tick** ([`ticks`]): the PIT interrupts at [`TICK_HZ`] and the IRQ 0
-//!   handler increments one 64-bit atomic counter (nothing else happens in
-//!   interrupt context). The tick wakes the event loop and counts timer
-//!   interrupts. It is *not* a reliable clock under emulation: QEMU drops
+//!   handler increments one 64-bit atomic counter and lets the scheduler
+//!   wake sleepers and check the time slice. The tick wakes the event loop
+//!   and counts timer interrupts. It is *not* a reliable clock under emulation: QEMU drops
 //!   PIT periods it cannot deliver on time (measured on a Windows host: about
 //!   125 of 1000 per second while the guest idles), so ticks undercount.
 //! - **Clock** ([`uptime_ns`]): the time-stamp counter, calibrated once at
@@ -48,6 +48,7 @@ pub fn init() -> Rate {
 /// IRQ 0 handler body.
 pub fn on_timer_interrupt() {
     let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    crate::sched::on_timer_tick();
     #[cfg(feature = "deliberate-interrupt-fault")]
     deliberate::maybe_fault(now);
     #[cfg(not(feature = "deliberate-interrupt-fault"))]
@@ -111,7 +112,8 @@ pub mod deliberate {
 
     static TARGET: AtomicU64 = AtomicU64::new(0);
     static AT_TICK: AtomicU64 = AtomicU64::new(u64::MAX);
-    /// Set by the event loop while it sleeps in `hlt`, so the fault never
+    /// Set by the event loop while it is blocked waiting for an interrupt
+    /// (so it holds no lock, in particular not the display), so the fault never
     /// interrupts a screen update (which would keep the panic banner from
     /// being drawn and make the smoke test flaky).
     pub static MAIN_LOOP_IDLE: AtomicBool = AtomicBool::new(false);

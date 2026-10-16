@@ -57,11 +57,13 @@ pub trait FrameSource {
     fn allocate_frame(&mut self) -> Option<PhysFrame>;
 }
 
-/// Permissions of a leaf mapping. Kernel-only: user pages do not exist yet.
+/// Permissions of a leaf mapping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flags {
     pub writable: bool,
     pub executable: bool,
+    /// Accessible from ring 3. Only ever set in a process's lower half.
+    pub user: bool,
 }
 
 impl Flags {
@@ -69,17 +71,25 @@ impl Flags {
     pub const READ: Self = Self {
         writable: false,
         executable: false,
+        user: false,
     };
     /// Read/write, no-execute: data, stacks, heap.
     pub const DATA: Self = Self {
         writable: true,
         executable: false,
+        user: false,
     };
     /// Read/execute, not writable: code.
     pub const CODE: Self = Self {
         writable: false,
         executable: true,
+        user: false,
     };
+
+    /// The same permissions, accessible from user mode.
+    pub const fn for_user(self) -> Self {
+        Self { user: true, ..self }
+    }
 
     fn entry_bits(self) -> u64 {
         let mut bits = bits::PRESENT;
@@ -88,6 +98,9 @@ impl Flags {
         }
         if !self.executable {
             bits |= bits::NO_EXECUTE;
+        }
+        if self.user {
+            bits |= bits::USER;
         }
         bits
     }
@@ -199,10 +212,13 @@ impl<'a, A: TableAccess> Mapper<'a, A> {
                 for i in 0..ENTRIES {
                     self.access.write(new, i, 0);
                 }
+                // A table created for a user page is user-accessible itself
+                // (the leaf still decides); kernel tables never are.
+                let user = if flags.user { bits::USER } else { 0 };
                 self.access.write(
                     table,
                     index,
-                    new.start().as_u64() | bits::PRESENT | bits::WRITABLE,
+                    new.start().as_u64() | bits::PRESENT | bits::WRITABLE | user,
                 );
                 new
             } else if entry & bits::HUGE != 0 {
@@ -210,6 +226,7 @@ impl<'a, A: TableAccess> Mapper<'a, A> {
             } else {
                 if (flags.writable && entry & bits::WRITABLE == 0)
                     || (flags.executable && entry & bits::NO_EXECUTE != 0)
+                    || (flags.user && entry & bits::USER == 0)
                 {
                     return Err(MapError::ParentRestricts);
                 }
@@ -362,6 +379,61 @@ impl<'a, A: TableAccess> Mapper<'a, A> {
         }
     }
 
+    /// Tear down everything mapped under the root entries `slots` (for a
+    /// process: its whole lower half). `free` receives the frame of every
+    /// 4 KiB leaf, then every table frame below the root; the root entries
+    /// are cleared. Huge leaves are cleared without freeing their target
+    /// (this mapper never creates them). The root frame itself is kept.
+    ///
+    /// No TLB flush is returned: only release a tree that is not loaded in
+    /// CR3. Returns the number of frames passed to `free`.
+    pub fn release(
+        &mut self,
+        slots: core::ops::Range<usize>,
+        mut free: impl FnMut(PhysFrame),
+    ) -> u64 {
+        let mut freed = 0;
+        for index in slots.start.min(ENTRIES)..slots.end.min(ENTRIES) {
+            let entry = self.access.read(self.root, index);
+            if entry & bits::PRESENT == 0 {
+                continue;
+            }
+            if entry & bits::HUGE == 0 {
+                let table = entry_frame(entry);
+                freed += self.release_table(table, 3, &mut free);
+                free(table);
+                freed += 1;
+            }
+            self.access.write(self.root, index, 0);
+        }
+        freed
+    }
+
+    fn release_table(
+        &mut self,
+        table: PhysFrame,
+        level: u8,
+        free: &mut impl FnMut(PhysFrame),
+    ) -> u64 {
+        let mut freed = 0;
+        for index in 0..ENTRIES {
+            let entry = self.access.read(table, index);
+            if entry & bits::PRESENT == 0 {
+                continue;
+            }
+            if level == 1 {
+                free(entry_frame(entry));
+                freed += 1;
+            } else if entry & bits::HUGE == 0 {
+                let child = entry_frame(entry);
+                freed += self.release_table(child, level - 1, free);
+                free(child);
+                freed += 1;
+            }
+        }
+        freed
+    }
+
     /// The level-1 table and index holding `page`'s present leaf.
     fn leaf_slot(&mut self, page: Page) -> Result<(PhysFrame, usize), MapError> {
         let addr = page.start();
@@ -496,6 +568,7 @@ mod tests {
         let wx = Flags {
             writable: true,
             executable: true,
+            user: false,
         };
         assert_eq!(
             mapper.map(p, frame(0x80_0000), wx, &mut src),
@@ -615,6 +688,102 @@ mod tests {
             .ignore();
         let t = mapper.translate(VirtAddr::new(0x5000).unwrap()).unwrap();
         assert!(!t.writable && !t.executable);
+    }
+
+    #[test]
+    fn user_pages_get_user_parents_and_kernel_parents_refuse_them() {
+        let mut model = Model::default();
+        let mut mapper = Mapper::new(frame(ROOT), &mut model);
+        let mut src = frames(16);
+        mapper
+            .map(
+                page(0x40_0000),
+                frame(0x80_0000),
+                Flags::CODE.for_user(),
+                &mut src,
+            )
+            .unwrap()
+            .ignore();
+        let t = mapper.translate(VirtAddr::new(0x40_0000).unwrap()).unwrap();
+        assert!(t.user && t.executable && !t.writable);
+        // Kernel page next to it: parents are user, the leaf is not.
+        mapper
+            .map(page(0x40_1000), frame(0x81_0000), Flags::DATA, &mut src)
+            .unwrap()
+            .ignore();
+        assert!(
+            !mapper
+                .translate(VirtAddr::new(0x40_1000).unwrap())
+                .unwrap()
+                .user
+        );
+        // A user page under kernel-only parents is refused.
+        mapper
+            .map(page(KERNEL), frame(0x82_0000), Flags::DATA, &mut src)
+            .unwrap()
+            .ignore();
+        assert_eq!(
+            mapper.map(
+                page(KERNEL + PAGE_SIZE),
+                frame(0x83_0000),
+                Flags::DATA.for_user(),
+                &mut src
+            ),
+            Err(MapError::ParentRestricts)
+        );
+        // W^X holds for user pages too.
+        let wx = Flags {
+            writable: true,
+            executable: true,
+            user: true,
+        };
+        assert_eq!(
+            mapper.map(page(0x40_2000), frame(0x84_0000), wx, &mut src),
+            Err(MapError::WriteExecute)
+        );
+    }
+
+    #[test]
+    fn release_frees_every_frame_in_the_slots_only() {
+        let mut model = Model::default();
+        let mut mapper = Mapper::new(frame(ROOT), &mut model);
+        let mut src = frames(64);
+        let mut leaves = Vec::new();
+        // Pages in two different PML4 slots of the lower half and across
+        // two page tables, plus one kernel page that must survive.
+        for (i, addr) in [0x40_0000u64, 0x40_1000, 0x60_0000, 0x80_0000_0000]
+            .into_iter()
+            .enumerate()
+        {
+            let f = frame(0x100_0000 + i as u64 * PAGE_SIZE);
+            mapper
+                .map(page(addr), f, Flags::DATA.for_user(), &mut src)
+                .unwrap()
+                .ignore();
+            leaves.push(f);
+        }
+        mapper
+            .map(page(KERNEL), frame(0x200_0000), Flags::DATA, &mut src)
+            .unwrap()
+            .ignore();
+        let tables_before = 64 - src.left;
+        let mut freed = Vec::new();
+        let count = mapper.release(0..256, |f| freed.push(f));
+        assert_eq!(count as usize, freed.len());
+        for leaf in &leaves {
+            assert!(freed.contains(leaf), "leaf {leaf:?} freed");
+        }
+        // Tables: slot 0 has PDPT, PD, 2 PTs; slot 1 has PDPT, PD, PT.
+        assert_eq!(freed.len(), leaves.len() + 7);
+        assert_eq!(tables_before, 7 + 3);
+        freed.sort();
+        freed.dedup();
+        assert_eq!(freed.len(), leaves.len() + 7, "nothing freed twice");
+        assert_eq!(mapper.translate(VirtAddr::new(0x40_0000).unwrap()), None);
+        assert!(mapper.translate(VirtAddr::new(KERNEL).unwrap()).is_some());
+        assert!(!freed.contains(&frame(0x200_0000)));
+        // Releasing again finds nothing.
+        assert_eq!(mapper.release(0..256, |_| panic!("already freed")), 0);
     }
 
     #[test]

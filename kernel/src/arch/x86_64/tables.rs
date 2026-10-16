@@ -6,20 +6,29 @@
 //! the same exhausted stack, and reset the machine without a word. This
 //! module installs:
 //!
-//! - a GDT with a 64-bit ring-0 code segment, a data segment and a TSS;
+//! - a GDT with 64-bit ring-0 code and data segments, ring-3 data and code
+//!   segments (in the order `sysret` would need, should it replace
+//!   `int 0x80` later) and a TSS;
 //! - a TSS whose IST slot 1 holds the double-fault stack. It starts as a
 //!   static emergency stack and is later replaced by a heap-independent stack
-//!   with an unmapped guard page ([`set_double_fault_stack`]);
+//!   with an unmapped guard page ([`set_double_fault_stack`]). Its RSP0 is
+//!   the stack the CPU switches to when an interrupt, exception or system
+//!   call arrives from ring 3: the scheduler points it at the running user
+//!   thread's kernel stack ([`set_kernel_stack`]). It has no I/O permission
+//!   bitmap, so ring 3 can never access I/O ports;
 //! - an IDT with all 256 gates: the 32 CPU exception vectors, and vectors
 //!   32..=255 for external interrupts (the 8259 PIC delivers 32..48; any
 //!   other vector is counted and reported as unexpected instead of faulting).
 //!   If the interrupt stub block fails its layout check, the external gates
 //!   stay absent and [`init`] reports it; the kernel then never enables
-//!   interrupts.
+//!   interrupts. Every gate has DPL 0 (ring 3 executing `int n` for it
+//!   raises #GP) except [`os_abi::syscall::VECTOR`], the system-call gate,
+//!   whose DPL is 3.
 //!
 //! The tables are statics that the CPU reads for the rest of the kernel's
-//! life; they are written only by [`init`] (once) and
-//! [`set_double_fault_stack`] (one aligned field, single CPU).
+//! life; they are written only by [`init`] (once),
+//! [`set_double_fault_stack`] and [`set_kernel_stack`] (one field each,
+//! single CPU).
 
 use core::cell::UnsafeCell;
 use core::mem::size_of;
@@ -30,7 +39,11 @@ use super::{DescriptorTablePointer, load_gdt, load_idt, load_task_register, relo
 
 pub const KERNEL_CODE_SELECTOR: u16 = 0x08;
 pub const KERNEL_DATA_SELECTOR: u16 = 0x10;
-pub const TSS_SELECTOR: u16 = 0x18;
+/// Ring-3 data (stack) segment, with RPL 3.
+pub const USER_DATA_SELECTOR: u16 = 0x18 | 3;
+/// Ring-3 64-bit code segment, with RPL 3.
+pub const USER_CODE_SELECTOR: u16 = 0x20 | 3;
+pub const TSS_SELECTOR: u16 = 0x28;
 
 /// IST slot (1-based, as encoded in gates) used for double faults.
 pub const DOUBLE_FAULT_IST: u8 = 1;
@@ -47,7 +60,7 @@ pub const IDT_ENTRIES: usize = 256;
 #[repr(C, packed(4))]
 struct TaskStateSegment {
     reserved0: u32,
-    /// Stacks for privilege changes; unused (no ring 3 yet).
+    /// Stacks for privilege changes; only RSP0 (entry from ring 3) is used.
     privilege_stacks: [u64; 3],
     reserved1: u64,
     /// Interrupt stack table, slots 1..=7.
@@ -67,7 +80,8 @@ struct Gate {
     selector: u16,
     /// Bits 0..=2: IST slot; rest reserved.
     ist: u8,
-    /// Present, DPL 0, type 0xE (64-bit interrupt gate: clears IF on entry).
+    /// Present, DPL 0 or 3, type 0xE (64-bit interrupt gate: clears IF on
+    /// entry).
     attributes: u8,
     offset_mid: u16,
     offset_high: u32,
@@ -87,12 +101,13 @@ impl Gate {
         reserved: 0,
     };
 
-    fn interrupt(handler: u64, ist: u8) -> Self {
+    /// Interrupt gate; `user` makes it invocable with `int n` from ring 3.
+    fn interrupt(handler: u64, ist: u8, user: bool) -> Self {
         Self {
             offset_low: handler as u16,
             selector: KERNEL_CODE_SELECTOR,
             ist: ist & 0x7,
-            attributes: 0x8E,
+            attributes: if user { 0xEE } else { 0x8E },
             offset_mid: (handler >> 16) as u16,
             offset_high: (handler >> 32) as u32,
             reserved: 0,
@@ -102,7 +117,7 @@ impl Gate {
 
 #[repr(C, align(16))]
 struct Tables {
-    gdt: [u64; 5],
+    gdt: [u64; GDT_ENTRIES],
     tss: TaskStateSegment,
     idt: [Gate; IDT_ENTRIES],
 }
@@ -119,8 +134,10 @@ struct CpuData<T>(UnsafeCell<T>);
 // the CPU reads them by address.
 unsafe impl<T> Sync for CpuData<T> {}
 
+const GDT_ENTRIES: usize = 7;
+
 static TABLES: CpuData<Tables> = CpuData(UnsafeCell::new(Tables {
-    gdt: [0; 5],
+    gdt: [0; GDT_ENTRIES],
     tss: TaskStateSegment {
         reserved0: 0,
         privilege_stacks: [0; 3],
@@ -143,6 +160,10 @@ static INTERRUPT_GATES: AtomicBool = AtomicBool::new(false);
 const KERNEL_CODE: u64 = 0x00AF_9A00_0000_FFFF;
 /// Flat ring-0 data segment: present, DPL 0, data, writable.
 const KERNEL_DATA: u64 = 0x00CF_9200_0000_FFFF;
+/// Flat ring-3 data segment: present, DPL 3, data, writable.
+const USER_DATA: u64 = 0x00CF_F200_0000_FFFF;
+/// Flat 64-bit ring-3 code segment: present, DPL 3, code, readable, L=1.
+const USER_CODE: u64 = 0x00AF_FA00_0000_FFFF;
 
 /// The two GDT words of an available 64-bit TSS descriptor for `base`.
 fn tss_descriptor(base: u64) -> (u64, u64) {
@@ -172,24 +193,37 @@ pub fn init() -> bool {
     tables.tss.io_map_base = size_of::<TaskStateSegment>() as u16;
     tables.tss.interrupt_stacks[usize::from(DOUBLE_FAULT_IST - 1)] = emergency_top;
     let (tss_low, tss_high) = tss_descriptor(&raw const tables.tss as u64);
-    tables.gdt = [0, KERNEL_CODE, KERNEL_DATA, tss_low, tss_high];
+    tables.gdt = [
+        0,
+        KERNEL_CODE,
+        KERNEL_DATA,
+        USER_DATA,
+        USER_CODE,
+        tss_low,
+        tss_high,
+    ];
     for (vector, gate) in tables.idt[..EXCEPTION_VECTORS].iter_mut().enumerate() {
         let ist = if vector == exceptions::DOUBLE_FAULT {
             DOUBLE_FAULT_IST
         } else {
             0
         };
-        *gate = Gate::interrupt(handlers[vector], ist);
+        *gate = Gate::interrupt(handlers[vector], ist, false);
     }
     if let Some(stubs) = exceptions::interrupt_entry_points() {
-        for (gate, &stub) in tables.idt[EXCEPTION_VECTORS..].iter_mut().zip(&stubs) {
-            *gate = Gate::interrupt(stub, 0);
+        for (offset, (gate, &stub)) in tables.idt[EXCEPTION_VECTORS..]
+            .iter_mut()
+            .zip(&stubs)
+            .enumerate()
+        {
+            let user = EXCEPTION_VECTORS + offset == usize::from(os_abi::syscall::VECTOR);
+            *gate = Gate::interrupt(stub, 0, user);
         }
         INTERRUPT_GATES.store(true, Ordering::SeqCst);
     }
 
     let gdt = DescriptorTablePointer {
-        limit: (size_of::<[u64; 5]>() - 1) as u16,
+        limit: (size_of::<[u64; GDT_ENTRIES]>() - 1) as u16,
         base: &raw const tables.gdt as u64,
     };
     let idt = DescriptorTablePointer {
@@ -202,7 +236,7 @@ pub fn init() -> bool {
     unsafe { load_gdt(&gdt) };
     // SAFETY: the GDT just loaded has 64-bit code at 0x08, data at 0x10.
     unsafe { reload_segments(KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR) };
-    // SAFETY: 0x18 is the available TSS descriptor built above.
+    // SAFETY: TSS_SELECTOR is the available TSS descriptor built above.
     unsafe { load_task_register(TSS_SELECTOR) };
     // SAFETY: the IDT is a static whose present gates point at the entry
     // stubs in `exceptions`, which follow the interrupt calling convention;
@@ -233,6 +267,25 @@ pub unsafe fn set_double_fault_stack(top: u64) {
     // (packed), hence the unaligned write. Single CPU: the only concurrent
     // reader is the CPU itself on a double fault, which sees either the old
     // (still valid) or the new value.
+    unsafe { field.write_unaligned(top) };
+}
+
+/// Point RSP0 (the stack used on entry from ring 3) at `top`.
+///
+/// # Safety
+///
+/// `top` must be the 16-byte-aligned top of a mapped, writable kernel stack
+/// that belongs to the thread about to run in ring 3 and stays mapped while
+/// it is installed. Nothing else may be using that stack while the thread
+/// runs in ring 3.
+pub unsafe fn set_kernel_stack(top: u64) {
+    let tables = TABLES.0.get();
+    // SAFETY: only computes the field's address inside the static (no
+    // reference to the packed TSS is created).
+    let field = unsafe { &raw mut (*tables).tss.privilege_stacks[0] };
+    // SAFETY: the field lies in the static TSS and is only 4-byte aligned
+    // (packed). Single CPU: the CPU reads it only on a ring-3 to ring-0
+    // transition, which cannot happen while the kernel runs this.
     unsafe { field.write_unaligned(top) };
 }
 

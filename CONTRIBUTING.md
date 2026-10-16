@@ -1,8 +1,9 @@
 # Contributing
 
-The project is at an early stage: the kernel boots in QEMU, sets up and
-self-tests memory management, shows a welcome screen and halts; nothing is
-usable yet. Focused, well-tested
+The project is at an early stage: the kernel boots in QEMU, self-tests
+memory management, interrupts and its scheduler, runs its own test programs
+as isolated user processes and shows a welcome screen with an input panel;
+nothing is usable yet. Focused, well-tested
 changes are welcome. Open an issue first for anything larger than a small fix.
 
 ## Before you start
@@ -40,6 +41,7 @@ cargo xtask ci
 ```
 
 If you touched the kernel, `crates/gfx`, `crates/boot-data`, `crates/mm`,
+`crates/exec`, `crates/os-abi`, `userspace/ulib`, `userspace/apps`,
 `tools/image-builder` or boot configuration, also run `cargo xtask smoke`
 (needs QEMU and OVMF). If you claim anything boots, include the exact command,
 VM and firmware versions, and the serial output. Never describe untested

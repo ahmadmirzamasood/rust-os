@@ -406,7 +406,8 @@ mod tests {
 
     #[test]
     fn input_panel_sits_below_the_card_and_contains_its_button() {
-        let lines = 7;
+        // The kernel's welcome card has 9 status rows.
+        let lines = 9;
         let reserve = input_panel_reserve(5);
         let card = welcome_card(1280, 800, lines, reserve);
         let layout = input_panel_layout(1280, 800, 5);

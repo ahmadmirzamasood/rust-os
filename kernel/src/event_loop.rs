@@ -1,12 +1,13 @@
-//! The kernel's main loop after boot: decode input, update the screen, log,
-//! and sleep until the next interrupt.
+//! The kernel's UI event loop (the boot thread, once boot is done): decode
+//! input, update the screen, log, and sleep until the next interrupt.
 //!
 //! Each iteration drains the PS/2 rings through [`Pipeline`], hands events
 //! to the [`Ui`] (if the screen is available) and logs key, button and
 //! click events on serial. It then checks, with interrupts disabled, that no
-//! input is pending before sleeping with `sti; hlt`, so a byte that arrives
-//! between the check and the halt still wakes the loop. The timer interrupt
-//! wakes it at least once per millisecond.
+//! input is pending before blocking until the next interrupt, so a byte
+//! that arrives between the check and the block still wakes the loop. Other
+//! threads and processes run while it is blocked. The timer interrupt wakes
+//! it at least once per tick.
 
 use boot_data::markers;
 use input::event::InputEvent;
@@ -15,7 +16,7 @@ use input::keyboard::Key;
 use crate::arch::x86_64::{self as arch, interrupts};
 use crate::input_events::Pipeline;
 use crate::ui::{Status, Ui};
-use crate::{kprintln, time};
+use crate::{kprintln, sched, time};
 
 /// How often the panel's uptime and counters are refreshed.
 const PANEL_REFRESH_MS: u64 = 250;
@@ -77,15 +78,25 @@ pub fn run(mut pipeline: Pipeline, mut ui: Option<Ui>) -> ! {
         }
 
         arch::disable_interrupts();
-        if pipeline.has_pending() {
-            arch::enable_interrupts();
-        } else {
+        if !pipeline.has_pending() {
             #[cfg(feature = "deliberate-interrupt-fault")]
             time::deliberate::MAIN_LOOP_IDLE.store(true, core::sync::atomic::Ordering::Relaxed);
-            arch::enable_interrupts_and_wait();
+            wait_for_interrupt();
             #[cfg(feature = "deliberate-interrupt-fault")]
             time::deliberate::MAIN_LOOP_IDLE.store(false, core::sync::atomic::Ordering::Relaxed);
         }
+        arch::enable_interrupts();
+    }
+}
+
+/// Sleep until the next interrupt (interrupts disabled on entry and exit).
+/// Other threads run meanwhile; without a scheduler, halt the CPU instead.
+fn wait_for_interrupt() {
+    if sched::started() {
+        sched::block(sched::Wait::Interrupt);
+    } else {
+        arch::enable_interrupts_and_wait();
+        arch::disable_interrupts();
     }
 }
 

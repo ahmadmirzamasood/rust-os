@@ -17,6 +17,8 @@
 //!   split into the heap, guarded stacks and a scratch area for self-tests.
 //!   All page-table edits go through [`mm::paging::Mapper`] while holding
 //!   the manager lock, which enforces W^X and never replaces a mapping.
+//!   Process address spaces ([`user`]) share the kernel half and own their
+//!   lower half.
 //! - **TLB.** After every edit of a present entry (unmap, protect) and after
 //!   every map, the kernel runs `invlpg` for that page before releasing the
 //!   lock. One CPU, so no other TLB needs a shootdown; SMP will.
@@ -31,6 +33,7 @@
 pub mod heap;
 mod phys;
 pub mod selftest;
+pub mod user;
 
 use boot_data::markers;
 use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
@@ -645,7 +648,8 @@ struct Guard {
     label: &'static str,
 }
 
-const MAX_GUARDS: usize = 16;
+/// Boot and double-fault stacks, self-test stacks and one per thread.
+const MAX_GUARDS: usize = 64;
 static GUARDS: TryLock<[Option<Guard>; MAX_GUARDS]> = TryLock::new([None; MAX_GUARDS]);
 
 fn register_guard(start: u64, end: u64, label: &'static str) {

@@ -1,0 +1,13 @@
+[package]
+name = "exec"
+description = "no_std executable and program-bundle formats: a validating static ELF64 parser and the boot program bundle. Host-tested."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

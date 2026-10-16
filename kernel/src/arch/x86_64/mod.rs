@@ -7,7 +7,9 @@
 //! - [`exceptions`]: the CPU exception entry stubs (save registers, call
 //!   Rust, restore, `iretq`);
 //! - [`probe`]: memory-access probes whose faults the exception handler can
-//!   recover from, used to test guard pages and page permissions.
+//!   recover from, used to test guard pages and page permissions;
+//! - [`switch`]: thread context switch, new-thread trampoline and the
+//!   `iretq` into ring 3.
 //!
 //! [`pic`], [`pit`] and [`interrupts`] use only the port I/O wrappers below.
 //!
@@ -20,20 +22,23 @@
 //! | [`halt_forever`] | `cli; hlt` | Stops the CPU for good |
 //! | [`read_cr0`] / [`write_cr0`], [`read_cr4`] / [`write_cr4`] | `mov` to/from CR0, CR4 | Control registers (write protection, SMEP/SMAP) |
 //! | [`read_cr2`] | `mov rax, cr2` | Faulting address of the last page fault |
-//! | [`read_cr3`] | `mov rax, cr3` | Physical address of the active PML4 |
+//! | [`read_cr3`] / [`write_cr3`] | `mov` to/from CR3 | Physical address of the active PML4 (switching address spaces) |
 //! | [`read_msr`] / [`write_msr`] | `rdmsr` / `wrmsr` | Model-specific registers (EFER.NXE) |
 //! | [`invalidate_page`] | `invlpg` | Drops a stale TLB entry after a page-table edit |
 //! | [`read_tsc`] | `rdtsc` | Time-stamp counter, the monotonic clock source |
 //! | [`load_gdt`], [`load_idt`], [`load_task_register`], [`reload_segments`] | `lgdt`, `lidt`, `ltr`, far return + `mov` to segment registers | Install the kernel's descriptor tables |
 //!
-//! All of these require CPL 0. The bootloader enters the kernel in ring 0 and
-//! the kernel never leaves it.
+//! All of these require CPL 0. The bootloader enters the kernel in ring 0;
+//! only user processes run in ring 3, entered through [`switch::enter_user`]
+//! and leaving it only through interrupts, exceptions and the system-call
+//! gate.
 
 pub mod exceptions;
 pub mod interrupts;
 pub mod pic;
 pub mod pit;
 pub mod probe;
+pub mod switch;
 pub mod tables;
 
 use core::arch::asm;
@@ -184,6 +189,19 @@ pub fn read_cr3() -> u64 {
     // SAFETY: reading CR3 is permitted at CPL 0 and has no side effects.
     unsafe { asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags)) };
     value
+}
+
+/// Load CR3 (switch address space). Flushes all non-global TLB entries.
+///
+/// # Safety
+///
+/// `value` must be the physical address of a valid PML4 that maps the
+/// running kernel (code, stack, data) identically to the current one, and
+/// that stays alive while loaded.
+pub unsafe fn write_cr3(value: u64) {
+    // SAFETY: per the contract above. Not `nomem`: every later memory access
+    // goes through the new tables.
+    unsafe { asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags)) };
 }
 
 /// Read CR4.
@@ -339,7 +357,13 @@ pub unsafe fn reload_segments(code: u16, data: u16) {
 
 /// Bits of interest in CPUID leaf 7 / EBX and in control registers.
 pub mod bits {
+    pub const CR0_MP: u64 = 1 << 1;
+    pub const CR0_EM: u64 = 1 << 2;
     pub const CR0_WP: u64 = 1 << 16;
+    pub const CR4_OSFXSR: u64 = 1 << 9;
+    pub const CR4_OSXMMEXCPT: u64 = 1 << 10;
+    pub const CR4_UMIP: u64 = 1 << 11;
+    pub const CR4_OSXSAVE: u64 = 1 << 18;
     pub const CR4_SMEP: u64 = 1 << 20;
     pub const CR4_SMAP: u64 = 1 << 21;
     pub const EFER: u32 = 0xC000_0080;
@@ -359,4 +383,41 @@ pub fn cpuid(leaf: u32, sub_leaf: u32) -> (u32, u32, u32, u32) {
     }
     let r = __cpuid_count(leaf, sub_leaf);
     (r.eax, r.ebx, r.ecx, r.edx)
+}
+
+/// What [`disable_simd`] found and changed.
+#[derive(Debug, Clone, Copy)]
+pub struct SimdState {
+    /// CR4.OSFXSR was set (by firmware) before.
+    pub sse_was_enabled: bool,
+    /// CR4.OSXSAVE was set before.
+    pub xsave_was_enabled: bool,
+    /// CR4.UMIP is set (ring 3 cannot use `sidt`/`sgdt`).
+    pub umip: bool,
+}
+
+/// Turn off x87, SSE and AVX for all code: set CR0.EM (x87 instructions
+/// raise #NM), clear CR0.MP, and clear CR4.OSFXSR, OSXMMEXCPT and OSXSAVE
+/// (SSE/AVX instructions raise #UD).
+///
+/// The kernel and user programs are compiled soft-float, so nothing needs
+/// these units, and the scheduler does not save their registers. Leaving
+/// them enabled would let one process read register values another left
+/// behind; disabled, a program that uses them is terminated instead.
+pub fn disable_simd() -> SimdState {
+    let cr4 = read_cr4();
+    let state = SimdState {
+        sse_was_enabled: cr4 & bits::CR4_OSFXSR != 0,
+        xsave_was_enabled: cr4 & bits::CR4_OSXSAVE != 0,
+        umip: cr4 & bits::CR4_UMIP != 0,
+    };
+    let cr0 = (read_cr0() | bits::CR0_EM) & !bits::CR0_MP;
+    // SAFETY: EM/MP only change how x87/SSE instructions trap; the kernel is
+    // compiled soft-float and executes none of them.
+    unsafe { write_cr0(cr0) };
+    let cr4 = cr4 & !(bits::CR4_OSFXSR | bits::CR4_OSXMMEXCPT | bits::CR4_OSXSAVE);
+    // SAFETY: clearing these bits only makes SSE/AVX/XSAVE instructions
+    // fault; no kernel code uses them (soft-float target).
+    unsafe { write_cr4(cr4) };
+    state
 }

@@ -14,16 +14,22 @@
 //!    main loop.
 //! 3. Handlers never take a lock (not even a [`crate::sync::TryLock`]),
 //!    never allocate, and never print. State they share with normal code is
-//!    atomics only: rings (single producer = handler, single consumer = main
-//!    loop) and counters.
+//!    atomics: rings (single producer = handler, single consumer = event
+//!    loop) and counters; plus the scheduler's [`crate::sync::IrqCell`],
+//!    which normal code only touches with interrupts disabled, so it can
+//!    never be found busy by a handler (on one CPU).
 //! 4. Normal code reads shared values one atomic at a time and tolerates
 //!    them changing in between (counters, ring indices). Code that ever
 //!    needs several values to be mutually consistent must bracket the reads
-//!    with [`super::disable_interrupts`] / [`super::enable_interrupts`];
-//!    nothing currently does.
-//! 5. The main loop sleeps with [`super::enable_interrupts_and_wait`] only
-//!    after seeing no pending work with interrupts disabled, so a wake-up
-//!    cannot be lost.
+//!    with [`super::disable_interrupts`] / [`super::enable_interrupts`]
+//!    (or use an `IrqCell`).
+//! 5. The event loop blocks (`sched::block(Wait::Interrupt)`) only after
+//!    seeing no pending work with interrupts disabled, so a wake-up cannot
+//!    be lost; the idle thread halts with
+//!    [`super::enable_interrupts_and_wait`] under the same rule.
+//! 6. After the handler and the EOI, [`crate::sched::on_interrupt`] wakes
+//!    threads waiting for an interrupt, and the dispatcher may switch
+//!    threads (preemption) before the interrupted context is resumed.
 //!
 //! CPU exceptions follow their own policy (see [`super::exceptions`]); a
 //! fatal exception inside a handler is reported with the IRQ it interrupted.
@@ -76,6 +82,7 @@ pub fn handle(vector: u64) {
     }
     CURRENT.store(NO_IRQ, Ordering::Relaxed);
     pic::end_of_interrupt(irq, true);
+    crate::sched::on_interrupt();
 }
 
 /// The IRQ whose handler is running, if any.
