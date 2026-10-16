@@ -160,8 +160,8 @@ to `master`, every pull request, and on demand:
 - **check** (Ubuntu and Windows): `cargo xtask ci`.
 - **boot-smoke** (Ubuntu): lints `image-builder`, then runs
   `cargo xtask smoke` (all scenarios) with the distribution's QEMU and OVMF.
-  The seven scenarios before `processes` have passed there (debug
-  profile); `processes` is new and has not run in CI yet. On that runner QEMU delivered the full
+  All eight scenarios, including `processes`, have passed there (debug
+  profile). On that runner QEMU delivered the full
   1000 timer interrupts per second. Release-profile smoke runs have been
   verified only on the Windows host above.
 
