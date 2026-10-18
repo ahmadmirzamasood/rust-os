@@ -35,6 +35,11 @@ name = "abuse"
 test = false
 bench = false
 
+[[bin]]
+name = "fileprobe"
+test = false
+bench = false
+
 [dependencies]
 ulib.workspace = true
 os-abi.workspace = true

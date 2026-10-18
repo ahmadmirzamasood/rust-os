@@ -19,7 +19,7 @@ UEFI firmware (OVMF, external)
             ├─ boot info: validate, copy memory map   crates/boot-data/ + kernel/src/main.rs
             ├─ memory: frames, mapping, stacks, heap  crates/mm/ + kernel/src/memory/
             ├─ drivers: 16550 serial (COM1)           kernel/src/serial.rs
-            │           PS/2 keyboard + mouse          kernel/src/drivers/ (block planned)
+            │           PS/2 keyboard + mouse, ATA PIO kernel/src/drivers/
             ├─ time: tick counter, TSC clock          kernel/src/time.rs
             ├─ input: rings, decoders, pointer        crates/input/ + kernel/src/input_events.rs
             ├─ event loop + input-debug screen        kernel/src/event_loop.rs, kernel/src/ui.rs
@@ -28,7 +28,7 @@ UEFI firmware (OVMF, external)
             ├─ threads: scheduler, context switch     kernel/src/sched/, arch/x86_64/switch.rs
             ├─ processes: address spaces, loader,     kernel/src/process/, memory/user.rs,
             │  handles, channels, system calls          syscall.rs, programs.rs, crates/exec/
-            ├─ vfs + filesystems                      (planned)
+            ├─ vfs + RAM/RSFS1 filesystems             crates/storage/, kernel/src/storage.rs
             ├─ power: shutdown, restart               (planned)
             └─ trusted modules (linked in for now)
                  └─ desktop model                     userspace/desktop/

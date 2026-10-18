@@ -53,6 +53,8 @@ jobs:
         # contained user faults) and the screenshot check succeed within the
         # per-scenario timeout. OVMF is auto-detected.
         run: cargo xtask smoke
+      - name: Disposable storage persistence and malformed-volume tests
+        run: cargo xtask storage-smoke
       - name: Show serial logs
         if: always()
         run: |

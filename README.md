@@ -5,7 +5,7 @@ graphical desktop: Computer, Files and Trash icons, a taskbar, basic window
 management, file browsing, and shutdown/restart. The look aims for the
 clarity of GNOME and Pantheon without using their code or branding.
 
-**Status: threads and isolated user processes.** There is no usable OS
+**Status: isolated user processes and experimental storage.** There is no usable OS
 yet. In QEMU with UEFI firmware the kernel boots and logs each boot stage
 on the serial port. It installs CPU exception handling, validates the boot
 information, sets up physical-frame allocation, kernel page mappings with
@@ -17,7 +17,8 @@ ring-3 processes with their own address spaces, a small versioned
 system-call interface, handles and message channels. A crashing process is
 terminated without affecting the kernel or other processes. The screen
 shows a welcome card with a mouse pointer, an input-debug panel and a
-clickable test button. There is no file system or desktop yet.
+clickable test button. A bounded RAM/RSFS1 filesystem is accessible through
+validated user-space calls; there is no file manager or desktop yet.
 
 | Area | State |
 | --- | --- |
@@ -31,7 +32,8 @@ clickable test button. There is no file system or desktop yet.
 | Kernel threads, preemptive round-robin scheduler, idle thread | Verified in QEMU (Windows host, debug and release): on-boot scheduler self-test (never-yielding threads all progress and are preempted; join, sleep, yield; stacks reclaimed) |
 | User processes in ring 3: address spaces, static ELF loader, system calls, handles, channels, fault containment | Verified in QEMU by `cargo xtask smoke --scenario processes` (Windows host, debug and release, 10 repeated runs; also with `-cpu max`, SMEP/SMAP on): IPC, preemption of CPU-bound processes, 9 contained crash kinds including reads, writes and jumps into kernel memory, 78 invalid-argument checks; see [docs/architecture/processes.md](docs/architecture/processes.md). Also passes in GitHub CI on Ubuntu |
 | Desktop, Files, Trash, window manager | Not started (only a host-tested model) |
-| Shutdown / restart | Not started |
+| Storage and filesystem | Verified in QEMU 11.1.0 on Windows, debug and release: RAM/RSFS1, PIIX3 ATA PIO, user file calls, clean-shutdown persistence and corrupt-volume rejection. See [docs/FILESYSTEM.md](docs/FILESYSTEM.md) for limits and evidence |
+| Shutdown / restart | General power management not started; storage smoke has a restricted Q35 test power-off |
 | Sleep | Deliberately unavailable until real suspend/resume exists |
 | VirtualBox / VMware | Planned, untested |
 
@@ -75,13 +77,14 @@ image format, and what the smoke test checks.
 kernel/              no_std kernel binary (x86_64-unknown-none)
 crates/os-abi/       no_std system-call interface shared by kernel and user space
 crates/exec/         no_std ELF parser and program-bundle format (host-tested)
+crates/storage/      no_std block/VFS interfaces, RAM filesystem, RSFS1 (host-tested)
 crates/gfx/          no_std framebuffer drawing, bitmap text, boot screens (host-tested)
 crates/boot-data/    no_std boot-info validation and serial boot markers (host-tested)
 crates/mm/           no_std frame allocator, page-table mapper, heap (host-tested)
 crates/input/        no_std input rings, PS/2 decoders, pointer, event queue (host-tested)
 userspace/desktop/   no_std desktop shell model (host-tested)
 userspace/ulib/      no_std user-space support library (entry, syscalls, IPC)
-userspace/apps/      user programs: init (process tests), echo, spin, fault, abuse
+userspace/apps/      user programs: init (process/file tests), echo, spin, fault, abuse, fileprobe
 xtask/               host build tool: lint, test, build, image, run, smoke
 tools/image-builder/ host tool wrapping the kernel into a UEFI disk image
 docs/                public architecture and build documentation

@@ -43,6 +43,7 @@ mod process;
 mod programs;
 mod sched;
 mod serial;
+mod storage;
 mod sync;
 mod syscall;
 mod time;
@@ -213,6 +214,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         matches!(mm_status, MemoryStatus::Ready { .. }) && arch::x86_64::interrupts_enabled(),
     );
     degraded |= !tasks.ok();
+    if tasks.ok() {
+        storage::init();
+    }
 
     let (screen_w, screen_h) = display_size();
     let pipeline = Pipeline::new(screen_w, screen_h);

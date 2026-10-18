@@ -3,6 +3,7 @@
 mod picture;
 mod qemu;
 mod smoke;
+mod storage_test;
 mod user;
 
 use std::path::{Path, PathBuf};
@@ -52,6 +53,7 @@ commands:
                   ramdisk is the program bundle (network on first run)
   run             build the image and boot it in QEMU (window + serial on stdio)
   smoke           boot smoke test in headless QEMU: serial markers + screenshot check
+  storage-smoke   disposable disk: two clean VM shutdowns/reboots and corrupt mount
   check-private   fail if private paths are tracked or staged in Git
   ci              lint + test + build + user + check-private (no QEMU needed)
   help            show this message
@@ -91,6 +93,7 @@ fn main() -> ExitCode {
         "image" => build_image(&options, KernelVariant::Normal).map(drop),
         "run" => run(&options),
         "smoke" => smoke(&options),
+        "storage-smoke" => storage_test::run(&options),
         "check-private" => check_private(),
         "ci" => lint()
             .and_then(|()| test())

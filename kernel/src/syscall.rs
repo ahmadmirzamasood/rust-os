@@ -53,6 +53,7 @@ fn call(number: u64, a: u64, b: u64, c: u64, d: u64) -> Result<u64, Error> {
         nr::CHANNEL_CREATE => process::channel_create(a),
         nr::CHANNEL_SEND => process::channel_send(a, b, c),
         nr::CHANNEL_RECV => process::channel_recv(a, b, c, d),
+        nr::FILE_OPEN..=nr::FS_TEST_SHUTDOWN => process::files::call(number, a, b, c, d),
         _ => Err(Error::UnknownSyscall),
     }
 }

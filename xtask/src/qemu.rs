@@ -129,7 +129,7 @@ pub fn base_command(
     if let Some(vars) = vars_copy {
         cmd.arg("-drive").arg(pflash(vars, false));
     }
-    let mut disk = OsString::from("format=raw,file=");
+    let mut disk = OsString::from("format=raw,snapshot=on,file=");
     disk.push(image);
     cmd.arg("-drive").arg(disk);
     cmd

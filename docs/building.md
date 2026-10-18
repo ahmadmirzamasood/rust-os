@@ -30,6 +30,7 @@ newer. The kernel itself uses no nightly features.
 | `cargo xtask run [--ovmf-code <file>] [--ovmf-vars <file>] [--timeout <secs>] [--headless]` | Builds the image and starts QEMU with a display window and the serial port on stdio | Verified (Windows, QEMU 11.1.0) |
 | `cargo xtask smoke [--scenario boot\|panic\|no-display\|page-fault\|stack-overflow\|interrupt-fault\|input\|processes\|all] [--timeout <secs>] [--release]` | Automated boot test in headless QEMU; see below | Verified (Windows, QEMU 11.1.0, debug and release) |
 | `cargo xtask check-private` | Fails if private paths are tracked or staged, or if `.agent-private/` is not ignored | Verified (Windows) |
+| `cargo xtask storage-smoke [--release] [--timeout <secs>]` | Creates only a new designated disposable data disk, boots twice with clean guest shutdown and persistent bytes, then rejects a corrupted volume without writing it | See [FILESYSTEM.md](FILESYSTEM.md) |
 | `cargo xtask ci` | `lint` + `test` + `build` + `user` + `check-private` (no QEMU needed) | Verified (Windows) |
 
 `cargo xtask lint` does not lint `tools/image-builder`, because that compiles
@@ -51,8 +52,11 @@ The window shows the welcome screen; the terminal shows the serial log.
 `RUST_OS_OVMF_CODE` / `RUST_OS_OVMF_VARS` may replace the `--ovmf-*` options.
 The vars file is copied before use so the template is never modified.
 
-All QEMU runs use `-machine q35 -m 256M -smp 1 -no-reboot -no-shutdown`, the
+Normal QEMU runs use `-machine q35 -m 256M -smp 1 -no-reboot -no-shutdown`, the
 firmware as pflash and the image as a raw disk.
+The boot disk uses `snapshot=on` to protect its source file. Storage smoke
+adds a separate PIIX3 IDE data disk and omits `-no-shutdown` so guest S5
+must actually terminate QEMU. It does not accept arbitrary disk paths.
 
 ## What the kernel does at boot
 

@@ -38,6 +38,7 @@
 //! calls check their condition and call `sched::block` with interrupts
 //! disabled in between, so a wake-up cannot be lost.
 
+pub mod files;
 pub mod loader;
 
 use alloc::boxed::Box;
@@ -64,6 +65,7 @@ type Name = ([u8; limits::NAME_MAX], usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Object {
+    File { id: u64, writable: bool },
     Channel { index: usize, side: usize },
     Process { slot: usize, pid: u32 },
 }
@@ -263,6 +265,7 @@ impl Table {
     /// Drop one reference to `object` (its handle was closed).
     fn release(&mut self, object: Object) {
         match object {
+            Object::File { .. } => {}
             Object::Channel { index, side } => {
                 let channel = self.channel(index);
                 channel.open[side] = false;
@@ -382,7 +385,7 @@ fn start(
             if transfer != 0 {
                 match t.processes[parent].lookup(transfer)? {
                     Object::Channel { .. } => {}
-                    Object::Process { .. } => return Err(Error::WrongType),
+                    _ => return Err(Error::WrongType),
                 }
             } else if t.processes[parent].free_handles() == 0 {
                 // (A transferred handle frees the slot the process handle
@@ -648,7 +651,7 @@ pub fn spawn(name_ptr: u64, name_len: u64, transfer: u64) -> Result<u64, Error> 
         if transfer != 0 {
             match t.processes[slot].lookup(transfer)? {
                 Object::Channel { .. } => {}
-                Object::Process { .. } => return Err(Error::WrongType),
+                _ => return Err(Error::WrongType),
             }
         }
         Ok(slot)
@@ -671,7 +674,7 @@ pub fn wait(handle: u64) -> Result<u64, Error> {
                         _ => Err(Error::BadHandle),
                     }
                 }
-                Object::Channel { .. } => Err(Error::WrongType),
+                _ => Err(Error::WrongType),
             });
             if let Ok(Err(key)) = step {
                 sched::block(Wait::Object(key));
@@ -731,7 +734,7 @@ pub fn channel_create(out: u64) -> Result<u64, Error> {
 fn endpoint(t: &Table, slot: usize, handle: u64) -> Result<(usize, usize), Error> {
     match t.processes[slot].lookup(handle)? {
         Object::Channel { index, side } => Ok((index, side)),
-        Object::Process { .. } => Err(Error::WrongType),
+        _ => Err(Error::WrongType),
     }
 }
 

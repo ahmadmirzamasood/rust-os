@@ -47,6 +47,12 @@ If you touched the kernel, `crates/gfx`, `crates/boot-data`, `crates/mm`,
 VM and firmware versions, and the serial output. Never describe untested
 behavior as working.
 
+For storage, file syscalls, or filesystem changes, also run
+`cargo xtask storage-smoke` and `cargo xtask storage-smoke --release`.
+These commands create their own disposable images; never substitute a
+host disk or a valuable image. The format and limits are in
+[docs/FILESYSTEM.md](docs/FILESYSTEM.md).
+
 ## Licensing
 
 Contributions are accepted under the project's [MIT License](LICENSE). Keep

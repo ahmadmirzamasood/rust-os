@@ -19,6 +19,13 @@ meaningful failure paths. The kernel never dereferences a user pointer; use
 `memory::user` for every access to user memory. Never point any tool at a host
 physical disk.
 
+Filesystem access is shared among all bundled applications: no UIDs, ACLs
+or application-private directories. File handles enforce ownership and
+read/write mode, and syscalls validate user buffers. The disk driver accepts
+only the designated disposable QEMU disk serial and geometry; malformed
+volumes are rejected without formatting. RSFS1 has checksums but no crash
+recovery or power-loss guarantee. See [docs/FILESYSTEM.md](docs/FILESYSTEM.md).
+
 A private vulnerability-reporting channel has not been configured yet. Until
 the maintainer publishes one here, please do not post exploit details
 publicly; open an issue asking for a private contact instead.

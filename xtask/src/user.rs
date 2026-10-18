@@ -17,7 +17,7 @@ use crate::{KERNEL_TARGET, Options, cargo, status, workspace_root};
 
 /// Programs packed into the bundle, in this order. `init` is started by
 /// the kernel; the others are started by `init`.
-pub const PROGRAMS: [&str; 5] = ["init", "echo", "spin", "fault", "abuse"];
+pub const PROGRAMS: [&str; 6] = ["init", "echo", "spin", "fault", "abuse", "fileprobe"];
 
 /// Link address of every user program.
 const IMAGE_BASE: u64 = 0x40_0000;

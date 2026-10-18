@@ -170,11 +170,15 @@ refuses to run on a kernel with another version.
 | 9 | `CHANNEL_CREATE` | out ptr → 0; writes two endpoint handles (`u32` each) |
 | 10 | `CHANNEL_SEND` | handle, ptr, len (≤ 256) → 0; `WouldBlock` when the peer's inbox holds 8 messages |
 | 11 | `CHANNEL_RECV` | handle, ptr, capacity, flags (`1` = don't wait) → length; blocks while empty |
+| 12–20 | File and volume calls | Open/read/write, list, mkdir, rename, remove, sync and volume kind; see [FILESYSTEM.md](../FILESYSTEM.md) |
+| 21 | `FS_TEST_SHUTDOWN` | Init-only, designated disposable disk only: sync and Q35 S5 test power-off |
 
 Errors: `UnknownSyscall`, `InvalidArgument`, `BadAddress`, `BadHandle`,
 `WrongType`, `TooLarge`, `NoResources`, `NotFound`, `WouldBlock`,
-`PeerClosed`, `BufferTooSmall` (the message stays queued). A failed call
-changes nothing. Exit status: an exit code, or "terminated by fault
+`PeerClosed`, `BufferTooSmall` (the message stays queued), plus the filesystem
+errors documented in [FILESYSTEM.md](../FILESYSTEM.md). Failed validation
+changes nothing; failed disk sync can leave partial writes. Exit status:
+an exit code, or "terminated by fault
 vector *n*".
 
 **Handles** are per-process values `(generation << 8) | (slot + 1)` in a
@@ -216,11 +220,18 @@ guard-crossing pointers; oversized lengths; invalid, stale, closed and
 wrong-type handles; handle-table exhaustion without leaks; full queues;
 closed peers; unknown flags and programs.
 
+It also runs filesystem tests through validated syscalls: directory/file
+operations, full-volume failure and reuse, pointer/flag errors, owned
+read-only/stale/deleted handles, and `fileprobe` in another address space.
+Storage smoke adds a second boot after clean shutdown; see
+[FILESYSTEM.md](../FILESYSTEM.md).
+
 ## Known limitations
 
 - One CPU; no SMP, no per-CPU data, no TLB shootdown.
 - One thread per process; no shared memory, no memory-allocation call, no
-  files, no arguments beyond one startup handle, no kill call.
+  arguments beyond one startup handle, no kill call. Files use a bounded,
+  shared-access volume without per-application permissions.
 - Round-robin only: no priorities, no real-time guarantees. Long kernel
   work with a `TryLock` held (for example a full-screen redraw) delays
   preemption until the next timer interrupt after it.
