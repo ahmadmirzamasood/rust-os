@@ -1,7 +1,7 @@
 # Software display and window service
 
-`cargo xtask desktop --release` boots the experimental graphical desktop.
-`cargo xtask run` retains the diagnostic screen and process test driver.
+`cargo xtask desktop --release` boots the graphical shell described in [desktop.md](../desktop.md). The two-client display demo below remains a separate smoke-test variant.
+`cargo xtask diagnostics` retains the diagnostic screen and process test driver.
 Both use the custom Rust kernel; no hosted window system or Linux guest is used.
 The desktop variant is built separately with kernel feature `desktop`.
 
@@ -74,7 +74,7 @@ windows, surfaces, focus and capture without affecting other clients.
 ## Device boundary
 
 Additive ABI v1 calls 22..24 exist only in the desktop kernel for the root
-bundled `display` process (not a child spawned with the same executable name).
+bundled `display` process, or `shell` in the shell variant (not a child spawned with the same executable name).
 Other callers receive UnknownSyscall. This is a boot-service role, not a general
 capability delegation mechanism.
 

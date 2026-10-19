@@ -173,3 +173,16 @@ fn verify(path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Creates only a new regular disposable image; never overwrites an existing file.
+pub(crate) fn fresh_disk(path: &Path) -> Result<(), String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    file.set_len(DISK_SECTORS * SECTOR as u64)
+        .map_err(|e| e.to_string())?;
+    storage::format(&mut Image(file)).map_err(|e| format!("format: {e:?}"))
+}

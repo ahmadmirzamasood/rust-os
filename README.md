@@ -5,7 +5,7 @@ graphical desktop: Computer, Files and Trash icons, a taskbar, basic window
 management, file browsing, and shutdown/restart. The look aims for the
 clarity of GNOME and Pantheon without using their code or branding.
 
-**Status: isolated user processes, experimental storage and software display.** There is no usable OS
+**Status: experimental graphical desktop, isolated processes and storage.** There is no general-purpose OS
 yet. In QEMU with UEFI firmware the kernel boots and logs each boot stage
 on the serial port. It installs CPU exception handling, validates the boot
 information, sets up physical-frame allocation, kernel page mappings with
@@ -18,8 +18,7 @@ system-call interface, handles and message channels. A crashing process is
 terminated without affecting the kernel or other processes. The screen
 shows a welcome card with a mouse pointer, an input-debug panel and a
 clickable test button. A bounded RAM/RSFS1 filesystem is accessible through
-validated user-space calls. An opt-in user-space display runs two demo windows;
-there is no file manager yet.
+validated user-space calls. The interactive command boots a user-space desktop with built-in views and a read-only root file listing.
 
 | Area | State |
 | --- | --- |
@@ -32,7 +31,7 @@ there is no file manager yet.
 | Interrupts, timer, PS/2 keyboard and mouse, pointer, input panel | Verified in QEMU by `cargo xtask smoke --scenario input` (Windows host; GitHub CI on Ubuntu): injected keys, pointer moves and clicks, queue overflow and recovery, timer vs host time; see [docs/architecture/interrupts-input.md](docs/architecture/interrupts-input.md). USB input is not supported |
 | Kernel threads, preemptive round-robin scheduler, idle thread | Verified in QEMU (Windows host, debug and release): on-boot scheduler self-test (never-yielding threads all progress and are preempted; join, sleep, yield; stacks reclaimed) |
 | User processes in ring 3: address spaces, static ELF loader, system calls, handles, channels, fault containment | Verified in QEMU by `cargo xtask smoke --scenario processes` (Windows host, debug and release, 10 repeated runs; also with `-cpu max`, SMEP/SMAP on): IPC, preemption of CPU-bound processes, 9 contained crash kinds including reads, writes and jumps into kernel memory, 78 invalid-argument checks; see [docs/architecture/processes.md](docs/architecture/processes.md). Also passes in GitHub CI on Ubuntu |
-| Software display and window manager | Opt-in ring-3 service and two demos; see [display.md](docs/architecture/display.md). Files/Trash GUI remains pending |
+| Software display and desktop | Ring-3 shell, launcher, built-in views and saved accent; see [desktop.md](docs/desktop.md). Trash operations remain unavailable |
 | Storage and filesystem | Verified in QEMU 11.1.0 on Windows, debug and release: RAM/RSFS1, PIIX3 ATA PIO, user file calls, clean-shutdown persistence and corrupt-volume rejection. See [docs/FILESYSTEM.md](docs/FILESYSTEM.md) for limits and evidence |
 | Shutdown / restart | General power management not started; storage smoke has a restricted Q35 test power-off |
 | Sleep | Deliberately unavailable until real suspend/resume exists |
@@ -114,7 +113,10 @@ are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 Read [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 Licensed under the [MIT License](LICENSE).
 
-Experimental user-space software display: run `cargo xtask desktop --release`.
-The existing diagnostic boot remains available through `cargo xtask run`.
+Graphical desktop: run `cargo xtask run --release` or `cargo xtask desktop --release`.
+The existing diagnostic boot remains available through `cargo xtask diagnostics`.
 See [display architecture and protocol](docs/architecture/display.md) for
 controls, limits, validation commands and the kernel/device boundary.
+
+See [desktop controls and limits](docs/desktop.md) for the shell, built-in
+applications, saved preferences and reboot test.

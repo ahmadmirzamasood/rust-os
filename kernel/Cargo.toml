@@ -14,6 +14,7 @@ bench = false
 
 [features]
 desktop = []
+shell = ["desktop"]
 # Fault-test builds used only by `cargo xtask smoke`; never enable them
 # otherwise. Each adds a deliberate failure at the end of boot:
 # panic right after the welcome screen is drawn,

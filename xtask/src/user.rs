@@ -17,7 +17,7 @@ use crate::{KERNEL_TARGET, Options, cargo, status, workspace_root};
 
 /// Programs packed into the bundle, in this order. `init` is started by
 /// the kernel; the others are started by `init`.
-pub const PROGRAMS: [&str; 9] = [
+pub const PROGRAMS: [&str; 10] = [
     "init",
     "echo",
     "spin",
@@ -25,6 +25,7 @@ pub const PROGRAMS: [&str; 9] = [
     "abuse",
     "fileprobe",
     "display",
+    "shell",
     "colors",
     "counter",
 ];

@@ -192,11 +192,18 @@ gets its own recorded test.
 
 ## Experimental display variant
 
-`cargo xtask desktop --release` boots the ring-3 display service and two demo
-applications. `cargo xtask smoke --scenario desktop` and the same command with
+`cargo xtask desktop --release` boots the ring-3 graphical shell. The older two-client demo remains the `desktop` smoke scenario. `cargo xtask smoke --scenario desktop` and the same command with
 `--release` test this variant with QMP input and screenshot checks. `smoke`
 now includes this ninth scenario. This variant's separate kernel/image paths
 use `target/fault-tests/desktop/` and `rust-os-uefi-desktop.img`; despite the
 historical directory name it is not a deliberate kernel-fault build.
-The normal `run` boot still exercises the original diagnostic UI and init tests.
+Use `cargo xtask diagnostics` to exercise the original diagnostic UI and init tests.
 See [display.md](architecture/display.md) for the exact protocol and limits.
+
+## Graphical shell
+
+The normal interactive command `cargo xtask run` now boots the ring-3 shell.
+Use `cargo xtask diagnostics` for the prior diagnostic UI. The normal kernel
+build and existing smoke scenarios retain their diagnostic configuration.
+`cargo xtask shell-smoke [--release]` tests shell interaction and preferences
+on a freshly created disposable disk across two boots; see [desktop.md](desktop.md).

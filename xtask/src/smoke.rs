@@ -1424,6 +1424,143 @@ fn desktop_interact(
     Ok(())
 }
 
+/// End-to-end shell checks against a fresh designated disposable RSFS1 volume.
+pub fn shell_run(options: &crate::Options) -> Result<(), String> {
+    let image = crate::build_image(options, crate::KernelVariant::FaultTest("shell"))?;
+    let firmware = options.firmware()?;
+    let qemu = qemu::program()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let dir = crate::workspace_root()
+        .join("target/shell-test")
+        .join(format!("{}-{stamp}", options.profile_dir()));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let disk = dir.join("DISPOSABLE-rsfs.img");
+    crate::storage_test::fresh_disk(&disk)?;
+    let vars = qemu::copy_vars(&firmware, &dir)?;
+    for boot in 1..=2 {
+        let serial = dir.join(format!("boot-{boot}.log"));
+        let mut cmd = qemu::base_command(&qemu, &firmware, vars.as_deref(), &image);
+        cmd.args(["-display", "none", "-monitor", "none", "-qmp", "stdio"]);
+        cmd.arg("-serial").arg(format!("file:{}", serial.display()));
+        cmd.args(["-device", "piix3-ide,id=databus"]);
+        cmd.arg("-drive").arg(format!(
+            "if=none,id=data,format=raw,cache=writeback,file={}",
+            disk.display()
+        ));
+        cmd.args([
+            "-device",
+            "ide-hd,drive=data,bus=databus.0,unit=0,serial=RUSTOS-DISPOSABLE",
+        ]);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let mut vm = Vm::new(cmd.spawn().map_err(|e| e.to_string())?)?;
+        let deadline = Instant::now() + options.timeout.unwrap_or(Duration::from_secs(120));
+        let mut watch = Watcher::new(&serial, deadline);
+        watch.wait("shell boot", Duration::from_secs(60), |log| {
+            log.contains("SHELL READY")
+        })?;
+        let log = watch.read();
+        let expected = if boot == 1 {
+            "preference=false persistent=true"
+        } else {
+            "preference=true persistent=true"
+        };
+        if !log.contains(expected) {
+            return Err(format!("preference load mismatch: {}", serial.display()));
+        }
+        let tap = |vm: &mut Vm, key: &str| -> Result<(), String> {
+            send_events(vm, &[key_event(key, true), key_event(key, false)])?;
+            std::thread::sleep(Duration::from_millis(160));
+            Ok(())
+        };
+        let snap = |vm: &mut Vm, name: &str| -> Result<RgbImage, String> {
+            std::thread::sleep(Duration::from_millis(500));
+            let im = vm.screendump(&dir.join(format!("{boot}-{name}.ppm")))?;
+            picture::save_png(&im, &dir.join(format!("{boot}-{name}.png")))?;
+            Ok(im)
+        };
+        if boot == 1 {
+            // Keyboard launcher: open all built-in applications, leave Settings focused.
+            for app in [0, 1, 2, 4, 3] {
+                tap(&mut vm, "esc")?;
+                for _ in 0..app {
+                    tap(&mut vm, "down")?;
+                }
+                let from = watch.read().len();
+                tap(&mut vm, "ret")?;
+                watch.wait("application launch", Duration::from_secs(10), |l| {
+                    l[from..].contains(&format!("SHELL LAUNCH {app}"))
+                })?;
+            }
+            let im = snap(&mut vm, "applications")?;
+            if im.pixel(280, 250) != Some([238, 242, 246]) {
+                return Err("Settings content pixels absent".into());
+            }
+            tap(&mut vm, "ret")?;
+            watch.wait("preference synced", Duration::from_secs(10), |l| {
+                l.contains("SHELL PREFERENCE true Ok")
+            })?;
+            let im = loop {
+                let im = snap(&mut vm, "saved")?;
+                if im.pixel(1200, 400) == Some([65, 42, 52]) || Instant::now() >= deadline {
+                    break im;
+                }
+            };
+            if im.pixel(1200, 400) != Some([65, 42, 52]) {
+                return Err("accent did not change".into());
+            }
+            tap(&mut vm, "f1")?;
+            watch.wait("minimize", Duration::from_secs(10), |l| {
+                l.contains("SHELL MINIMIZE")
+            })?;
+            tap(&mut vm, "f2")?;
+            watch.wait("restore", Duration::from_secs(10), |l| {
+                l.contains("SHELL RESTORE")
+            })?;
+            tap(&mut vm, "tab")?;
+            tap(&mut vm, "f3")?;
+            watch.wait("close", Duration::from_secs(10), |l| {
+                l.contains("SHELL CLOSE")
+            })?;
+            // Mouse desktop icon launch: pin to origin and click Computer.
+            move_pointer(&mut vm, -2000, -2000)?;
+            move_pointer(&mut vm, 56, 90)?;
+            let from = watch.read().len();
+            send_events(&mut vm, &[button_event("left", true)])?;
+            std::thread::sleep(Duration::from_millis(80));
+            send_events(&mut vm, &[button_event("left", false)])?;
+            watch.wait("mouse icon launch", Duration::from_secs(10), |l| {
+                l[from..].contains("SHELL LAUNCH 0")
+            })?;
+            snap(&mut vm, "mouse")?;
+        } else {
+            let im = loop {
+                let im = snap(&mut vm, "restored")?;
+                if im.pixel(1200, 400) == Some([65, 42, 52]) || Instant::now() >= deadline {
+                    break im;
+                }
+            };
+            if im.pixel(1200, 400) != Some([65, 42, 52]) {
+                return Err("saved accent missing after reboot".into());
+            }
+        }
+        if watch.read().contains("SHELL FAILED") || watch.read().contains("KERNEL PANIC") {
+            return Err("shell/kernel failure".into());
+        }
+        vm.quit();
+        eprintln!("shell boot {boot}: PASS");
+    }
+    eprintln!(
+        "shell checks PASS: launch/focus/minimize/restore/close, keyboard/mouse, synced preference after reboot; evidence {}",
+        dir.display()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -51,8 +51,10 @@ commands:
   user            build the user programs, validate them, write the program bundle
   image           build kernel, user programs and a UEFI GPT disk image whose
                   ramdisk is the program bundle (network on first run)
-  desktop         boot the experimental user-space display and demos
-  run             build the image and boot it in QEMU (window + serial on stdio)
+  desktop         boot the graphical desktop shell
+  shell-smoke     disposable disk: shell navigation and reboot preferences
+  run             boot the graphical desktop in QEMU
+  diagnostics     boot the original diagnostic UI and process tests
   smoke           boot smoke test in headless QEMU: serial markers + screenshot check
   storage-smoke   disposable disk: two clean VM shutdowns/reboots and corrupt mount
   check-private   fail if private paths are tracked or staged in Git
@@ -92,10 +94,12 @@ fn main() -> ExitCode {
         "build" => build_kernel(&options, KernelVariant::Normal).map(drop),
         "user" => user::build_bundle(&options).map(drop),
         "image" => build_image(&options, KernelVariant::Normal).map(drop),
-        "run" => run(&options, KernelVariant::Normal),
-        "desktop" => run(&options, KernelVariant::FaultTest("desktop")),
+        "run" => run(&options, KernelVariant::FaultTest("shell")),
+        "diagnostics" => run(&options, KernelVariant::Normal),
+        "desktop" => run(&options, KernelVariant::FaultTest("shell")),
         "smoke" => smoke(&options),
         "storage-smoke" => storage_test::run(&options),
+        "shell-smoke" => smoke::shell_run(&options),
         "check-private" => check_private(),
         "ci" => lint()
             .and_then(|()| test())
@@ -241,7 +245,8 @@ fn lint() -> Result<(), String> {
     host.args(["clippy", "--all-targets", "--", "-D", "warnings"]);
     status(host)?;
 
-    let variants = std::iter::once(Some("desktop"))
+    let variants = std::iter::once(Some("shell"))
+        .chain(std::iter::once(Some("desktop")))
         .chain(std::iter::once(None))
         .chain(FAULT_TEST_FEATURES.map(Some));
     for features in variants {
@@ -309,6 +314,25 @@ fn run(options: &Options, variant: KernelVariant) -> Result<(), String> {
     let vars = qemu::copy_vars(&firmware, image_dir)?;
 
     let mut cmd = qemu::base_command(&qemu, &firmware, vars.as_deref(), &image);
+    if variant == KernelVariant::FaultTest("shell") {
+        // A fixed project-owned regular image, never a caller-supplied host disk.
+        // Create exclusively once; the guest rejects corruption without formatting.
+        let data_dir = workspace_root().join("target/desktop-data");
+        std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+        let data = data_dir.join("DISPOSABLE-rsfs.img");
+        if !data.try_exists().map_err(|e| e.to_string())? {
+            storage_test::fresh_disk(&data)?;
+        }
+        cmd.args(["-device", "piix3-ide,id=databus"]);
+        cmd.arg("-drive").arg(format!(
+            "if=none,id=data,format=raw,cache=writeback,file={}",
+            data.display()
+        ));
+        cmd.args([
+            "-device",
+            "ide-hd,drive=data,bus=databus.0,unit=0,serial=RUSTOS-DISPOSABLE",
+        ]);
+    }
     cmd.args(["-serial", "stdio"]);
     if options.headless {
         cmd.args(["-display", "none"]);

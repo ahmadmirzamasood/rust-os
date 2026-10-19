@@ -64,3 +64,8 @@ os-abi.workspace = true
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "shell"
+test = false
+bench = false
