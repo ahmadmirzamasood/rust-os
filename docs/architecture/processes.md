@@ -172,6 +172,7 @@ refuses to run on a kernel with another version.
 | 11 | `CHANNEL_RECV` | handle, ptr, capacity, flags (`1` = don't wait) → length; blocks while empty |
 | 12–20 | File and volume calls | Open/read/write, list, mkdir, rename, remove, sync and volume kind; see [FILESYSTEM.md](../FILESYSTEM.md) |
 | 21 | `FS_TEST_SHUTDOWN` | Init-only, designated disposable disk only: sync and Q35 S5 test power-off |
+| 25 | `FS_SYNC_STEP` | One writeback sector or flush; 0=pending, 1=complete; mutations return WouldBlock until finished |
 
 Errors: `UnknownSyscall`, `InvalidArgument`, `BadAddress`, `BadHandle`,
 `WrongType`, `TooLarge`, `NoResources`, `NotFound`, `WouldBlock`,

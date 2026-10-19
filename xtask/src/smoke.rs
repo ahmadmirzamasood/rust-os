@@ -1548,16 +1548,123 @@ pub fn shell_run(options: &crate::Options) -> Result<(), String> {
                 return Err("saved accent missing after reboot".into());
             }
         }
+        shell_file_checks(&mut vm, &mut watch, boot, &dir)?;
         if watch.read().contains("SHELL FAILED") || watch.read().contains("KERNEL PANIC") {
             return Err("shell/kernel failure".into());
         }
         vm.quit();
-        eprintln!("shell boot {boot}: PASS");
+        crate::storage_test::verify_shell_files(&disk, boot)?;
+        eprintln!("shell boot {boot}: PASS (independent disk remount and Files bytes)");
     }
     eprintln!(
-        "shell checks PASS: launch/focus/minimize/restore/close, keyboard/mouse, synced preference after reboot; evidence {}",
+        "shell checks PASS: window/input, preferences, Files create/rename/copy/Trash/reboot/restore/confirmed delete and independent remount; evidence {}",
         dir.display()
     );
+    Ok(())
+}
+
+// Exercise real shell controls, then verify exact persisted bytes independently.
+fn shell_file_checks(
+    vm: &mut Vm,
+    watch: &mut Watcher,
+    boot: usize,
+    dir: &Path,
+) -> Result<(), String> {
+    fn tap(vm: &mut Vm, key: &str) -> Result<(), String> {
+        send_events(vm, &[key_event(key, true), key_event(key, false)])?;
+        std::thread::sleep(Duration::from_millis(140));
+        Ok(())
+    }
+    fn text(vm: &mut Vm, value: &str) -> Result<(), String> {
+        for c in value.chars() {
+            tap(vm, &c.to_string())?;
+        }
+        tap(vm, "ret")
+    }
+    fn open(vm: &mut Vm, watch: &mut Watcher, app: usize) -> Result<(), String> {
+        let from = watch.read().len();
+        tap(vm, "esc")?;
+        for _ in 0..app {
+            tap(vm, "down")?;
+        }
+        tap(vm, "ret")?;
+        watch
+            .wait("Files view launch", Duration::from_secs(10), |l| {
+                l[from..].contains(&format!("SHELL LAUNCH {app}"))
+            })
+            .map(drop)
+    }
+    fn finish(vm: &mut Vm, watch: &mut Watcher, app: usize, from: usize) -> Result<(), String> {
+        watch.wait("Files operation", Duration::from_secs(20), |l| {
+            l[from..].contains(&format!("FILES {app} Complete"))
+                || l[from..].contains("partial work kept")
+        })?;
+        if watch.read()[from..].contains("partial work kept") {
+            return Err("Files operation failed; see serial log".into());
+        }
+        // Redraw after completion before sending another key.
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = vm;
+        Ok(())
+    }
+    if boot == 1 {
+        open(vm, watch, 1)?;
+        tap(vm, "n")?;
+        let from = watch.read().len();
+        text(vm, "docs")?;
+        finish(vm, watch, 0, from)?;
+        tap(vm, "ret")?; // docs is the first (directory) row.
+        tap(vm, "t")?;
+        let from = watch.read().len();
+        text(vm, "alpha")?;
+        finish(vm, watch, 0, from)?;
+        tap(vm, "r")?;
+        let from = watch.read().len();
+        text(vm, "beta")?;
+        finish(vm, watch, 0, from)?;
+        tap(vm, "ret")?;
+        tap(vm, "backspace")?; // read-only text viewer.
+        tap(vm, "c")?;
+        tap(vm, "backspace")?;
+        let from = watch.read().len();
+        tap(vm, "v")?;
+        finish(vm, watch, 0, from)?;
+        tap(vm, "down")?; // root: docs, beta, desktop.pref.
+        let from = watch.read().len();
+        tap(vm, "delete")?;
+        finish(vm, watch, 0, from)?;
+        open(vm, watch, 2)?;
+    } else {
+        open(vm, watch, 2)?;
+        let from = watch.read().len();
+        tap(vm, "u")?;
+        finish(vm, watch, 1, from)?;
+        open(vm, watch, 1)?;
+        tap(vm, "down")?;
+        // Explicit confirmation, including a cancellation that must not delete.
+        tap(vm, "d")?;
+        tap(vm, "esc")?;
+        let from = watch.read().len();
+        tap(vm, "delete")?;
+        finish(vm, watch, 0, from)?;
+        open(vm, watch, 2)?;
+        tap(vm, "d")?;
+        let from = watch.read().len();
+        text(vm, "delete")?;
+        finish(vm, watch, 1, from)?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let im = loop {
+        std::thread::sleep(Duration::from_millis(500));
+        let im = vm.screendump(&dir.join(format!("{boot}-files.ppm")))?;
+        if im.pixel(400, 180) == Some([60, 100, 150]) {
+            break im;
+        }
+        if Instant::now() >= deadline {
+            return Err("Trash focused pixels absent".into());
+        }
+    };
+    picture::save_png(&im, &dir.join(format!("{boot}-files.png")))?;
     Ok(())
 }
 

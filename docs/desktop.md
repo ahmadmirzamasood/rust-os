@@ -6,9 +6,10 @@ retains the original welcome/input screen and process-test driver. The original
 two-process graphics demo remains covered by `smoke --scenario desktop`.
 The shell image is `target/images/<profile>/rust-os-uefi-shell.img`.
 
-Computer reports the mounted volume. Files is a small read-only root listing
-(up to the view's line limit; no nested navigation or editing). Trash opens an
-explicit unavailable explanation; it never deletes files. Settings changes the
+Computer reports the mounted volume and opens Files with Enter/click. Files
+provides navigation, metadata, file operations and a read-only text viewer.
+Trash supports original-path restore and confirmed permanent deletion. See
+[Files controls, errors and limits](files.md). Settings changes the
 desktop accent. About reports version, build profile, architecture and ABI.
 These five built-in views share the trusted shell process; independent client
 processes remain supported by the display demo, but runtime executable discovery
@@ -68,7 +69,7 @@ passed both VM boots in each profile. `cargo xtask run --release --headless
 | Preferences survive reboot | Accent synced, then decoded and drawn after a new VM boot |
 | Normal navigation needs no terminal | Launcher, window controls, task strip and Settings available in the GUI |
 
-These gates apply to the bounded built-in desktop. General-purpose Files/Trash,
+These gates apply to the bounded built-in desktop. General-purpose storage,
 power management, independent built-in application processes and compatibility
 with other hypervisors or physical hardware remain unverified or unimplemented.
 

@@ -207,3 +207,5 @@ Use `cargo xtask diagnostics` for the prior diagnostic UI. The normal kernel
 build and existing smoke scenarios retain their diagnostic configuration.
 `cargo xtask shell-smoke [--release]` tests shell interaction and preferences
 on a freshly created disposable disk across two boots; see [desktop.md](desktop.md).
+
+Files/Trash interaction and two-boot persistence checks run in `cargo xtask shell-smoke [--release]`; see [files.md](files.md).

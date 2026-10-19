@@ -231,3 +231,46 @@ fn full_disk_remount_and_reuse() {
             .is_ok()
     );
 }
+
+#[test]
+fn stepped_writeback_freezes_mutations_can_resume_and_remount() {
+    let mut disk = Disk::new();
+    format(&mut disk).unwrap();
+    let mut fs = DiskFs::mount(disk).unwrap();
+    let id = fs.create("/a", Kind::File).unwrap();
+    fs.write(id, 0, b"saved").unwrap();
+    assert_eq!(fs.sync_step(), Ok(false));
+    assert_eq!(fs.create("/b", Kind::File), Err(Error::Busy));
+    assert_eq!(fs.write(id, 0, b"changed"), Err(Error::Busy));
+    let mut bytes = [0; 5];
+    assert_eq!(fs.read(id, 0, &mut bytes), Ok(5));
+    assert_eq!(&bytes, b"saved");
+    // A synchronous caller can complete a cooperative caller's interrupted sync.
+    fs.sync().unwrap();
+    fs.create("/b", Kind::Directory).unwrap();
+    let mut calls = 0;
+    while !fs.sync_step().unwrap() {
+        calls += 1;
+        assert!(calls <= NODES * 9);
+    }
+    assert!(calls >= NODES);
+    let fs = DiskFs::mount(fs.into_device()).unwrap();
+    let id = fs.lookup("/a").unwrap().0;
+    assert_eq!(fs.read(id, 0, &mut bytes), Ok(5));
+    assert_eq!(&bytes, b"saved");
+    assert_eq!(fs.lookup("/b").unwrap().1, Kind::Directory);
+}
+#[test]
+fn stepped_writeback_failure_poisons_mount() {
+    let mut disk = Disk::new();
+    format(&mut disk).unwrap();
+    let mut fs = DiskFs::mount(disk).unwrap();
+    let id = fs.create("/a", Kind::File).unwrap();
+    fs.write(id, 0, b"keep").unwrap();
+    fs.device.writes_left = Some(2);
+    assert_eq!(fs.sync_step(), Ok(false));
+    assert_eq!(fs.sync_step(), Ok(false));
+    assert_eq!(fs.sync_step(), Err(Error::Io));
+    assert_eq!(fs.sync_step(), Err(Error::ReadOnly));
+    assert_eq!(fs.remove("/a"), Err(Error::ReadOnly));
+}

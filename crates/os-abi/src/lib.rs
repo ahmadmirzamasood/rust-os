@@ -78,7 +78,10 @@ pub mod syscall {
     pub const CHANNEL_RECV: u64 = 11;
 
     /// Number of defined calls (numbers are `0..COUNT`).
-    pub const COUNT: u64 = 25;
+    pub const COUNT: u64 = 26;
+    /// One writeback sector/flush; returns 1 when complete, 0 while pending.
+    /// Mutations return WouldBlock during writeback; reads remain available.
+    pub const FS_SYNC_STEP: u64 = 25;
     /// Bundled display only, desktop kernel: dimensions, RGB row copy, input packet.
     pub const DISPLAY_INFO: u64 = 22;
     pub const DISPLAY_ROW: u64 = 23;

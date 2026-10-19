@@ -186,3 +186,32 @@ pub(crate) fn fresh_disk(path: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     storage::format(&mut Image(file)).map_err(|e| format!("format: {e:?}"))
 }
+
+/// Independently remount only the disposable image created by shell_run.
+pub fn verify_shell_files(path: &Path, boot: usize) -> Result<(), String> {
+    let image = File::open(path).map_err(|e| e.to_string())?;
+    let fs = DiskFs::mount(Image(image)).map_err(|e| format!("shell remount: {e:?}"))?;
+    let check = |path: &str, expected: &[u8]| -> Result<(), String> {
+        let id = fs.lookup(path).map_err(|e| format!("{path}: {e:?}"))?.0;
+        let mut bytes = [0; 4096];
+        let n = fs
+            .read(id, 0, &mut bytes)
+            .map_err(|e| format!("{path}: {e:?}"))?;
+        if &bytes[..n] == expected {
+            Ok(())
+        } else {
+            Err(format!("wrong bytes at {path}"))
+        }
+    };
+    check("/docs/beta", b"New text file.\n")?;
+    if boot == 1 {
+        check("/.trash/t00/origin", b"RST1\n/beta")?;
+        check("/.trash/t00/data", b"New text file.\n")?;
+    } else if fs.lookup("/.trash/t00").is_ok() {
+        return Err("Trash record survived permanent delete".into());
+    }
+    if fs.lookup("/beta").is_ok() {
+        return Err("trashed/deleted file still at original path".into());
+    }
+    Ok(())
+}
