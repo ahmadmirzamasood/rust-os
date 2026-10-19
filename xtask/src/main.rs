@@ -51,6 +51,7 @@ commands:
   user            build the user programs, validate them, write the program bundle
   image           build kernel, user programs and a UEFI GPT disk image whose
                   ramdisk is the program bundle (network on first run)
+  desktop         boot the experimental user-space display and demos
   run             build the image and boot it in QEMU (window + serial on stdio)
   smoke           boot smoke test in headless QEMU: serial markers + screenshot check
   storage-smoke   disposable disk: two clean VM shutdowns/reboots and corrupt mount
@@ -66,7 +67,7 @@ options:
                             smoke: per-scenario limit (default: 120)
   --headless                run: no display window
   --scenario <name>         smoke: boot, panic, no-display, page-fault,
-                            stack-overflow, interrupt-fault, input, processes
+                            stack-overflow, interrupt-fault, input, processes, desktop
                             or all (default: all)
 
 QEMU is `qemu-system-x86_64` from PATH, or RUST_OS_QEMU.
@@ -91,7 +92,8 @@ fn main() -> ExitCode {
         "build" => build_kernel(&options, KernelVariant::Normal).map(drop),
         "user" => user::build_bundle(&options).map(drop),
         "image" => build_image(&options, KernelVariant::Normal).map(drop),
-        "run" => run(&options),
+        "run" => run(&options, KernelVariant::Normal),
+        "desktop" => run(&options, KernelVariant::FaultTest("desktop")),
         "smoke" => smoke(&options),
         "storage-smoke" => storage_test::run(&options),
         "check-private" => check_private(),
@@ -239,7 +241,9 @@ fn lint() -> Result<(), String> {
     host.args(["clippy", "--all-targets", "--", "-D", "warnings"]);
     status(host)?;
 
-    let variants = std::iter::once(None).chain(FAULT_TEST_FEATURES.map(Some));
+    let variants = std::iter::once(Some("desktop"))
+        .chain(std::iter::once(None))
+        .chain(FAULT_TEST_FEATURES.map(Some));
     for features in variants {
         let mut kernel = cargo();
         kernel.args(["clippy", "--package", "kernel", "--target", KERNEL_TARGET]);
@@ -297,10 +301,10 @@ fn build_image(options: &Options, variant: KernelVariant) -> Result<PathBuf, Str
     Ok(image)
 }
 
-fn run(options: &Options) -> Result<(), String> {
+fn run(options: &Options, variant: KernelVariant) -> Result<(), String> {
     let firmware = options.firmware()?;
     let qemu = qemu::program()?;
-    let image = build_image(options, KernelVariant::Normal)?;
+    let image = build_image(options, variant)?;
     let image_dir = image.parent().ok_or("image has no parent directory")?;
     let vars = qemu::copy_vars(&firmware, image_dir)?;
 

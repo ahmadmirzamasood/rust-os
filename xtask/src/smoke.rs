@@ -57,10 +57,11 @@ pub enum Scenario {
     /// kernel reports every user fault, survives them all and still takes
     /// input afterwards.
     Processes,
+    Desktop,
 }
 
 impl Scenario {
-    pub const ALL: [Scenario; 8] = [
+    pub const ALL: [Scenario; 9] = [
         Self::Boot,
         Self::Panic,
         Self::NoDisplay,
@@ -69,6 +70,7 @@ impl Scenario {
         Self::InterruptFault,
         Self::Input,
         Self::Processes,
+        Self::Desktop,
     ];
 
     pub fn parse(name: &str) -> Result<Vec<Scenario>, String> {
@@ -97,6 +99,7 @@ impl Scenario {
             Self::InterruptFault => "interrupt-fault",
             Self::Input => "input",
             Self::Processes => "processes",
+            Self::Desktop => "desktop",
         }
     }
 
@@ -104,6 +107,7 @@ impl Scenario {
     pub const fn kernel_feature(self) -> Option<&'static str> {
         match self {
             Self::Boot | Self::NoDisplay | Self::Input | Self::Processes => None,
+            Self::Desktop => Some("desktop"),
             Self::Panic => Some("deliberate-panic"),
             Self::PageFault => Some("deliberate-page-fault"),
             Self::StackOverflow => Some("deliberate-stack-overflow"),
@@ -141,6 +145,22 @@ impl Scenario {
         }
         match self {
             Self::Processes => judge_processes(log),
+            Self::Desktop => {
+                if log.contains(markers::PANIC)
+                    || log.contains(markers::CPU_EXCEPTION)
+                    || log.contains("display failed")
+                {
+                    Verdict::Fail("display or kernel failed".into())
+                } else if log.contains("DEMO READY Colors")
+                    && log.contains("DEMO READY Input counter")
+                    && log.contains("DISPLAY REJECT client 1")
+                    && log.contains("DISPLAY REJECT client 2")
+                {
+                    Verdict::Pass
+                } else {
+                    Verdict::Pending
+                }
+            }
             Self::Boot | Self::Input => {
                 if log.contains(markers::PANIC) || log.contains(markers::CPU_EXCEPTION) {
                     Verdict::Fail("kernel panicked or took a CPU exception".into())
@@ -539,6 +559,13 @@ pub fn run(scenario: Scenario, image: &Path, setup: &Setup) -> Result<String, St
         elapsed.as_secs_f64(),
         serial_log.display()
     );
+    if scenario == Scenario::Desktop {
+        desktop_interact(&mut vm, &serial_log, &dir, started + setup.timeout)?;
+        vm.quit();
+        return Ok(format!(
+            "{summary}; two windows, focus/input, move/resize, client failure checked"
+        ));
+    }
     let mut input = None;
     if scenario == Scenario::Processes {
         let deadline = started + setup.timeout;
@@ -1267,6 +1294,134 @@ fn json_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// End-to-end display checks use guest output plus pixels, never readiness alone.
+fn desktop_interact(
+    vm: &mut Vm,
+    serial: &Path,
+    dir: &Path,
+    deadline: Instant,
+) -> Result<(), String> {
+    let mut w = Watcher::new(serial, deadline);
+    let snap = |vm: &mut Vm, name: &str| -> Result<RgbImage, String> {
+        let image = vm.screendump(&dir.join(format!("{name}.ppm")))?;
+        picture::save_png(&image, &dir.join(format!("{name}.png")))?;
+        Ok(image)
+    };
+    // Wait for full row presentation: demo readiness can precede the final row.
+    let image = loop {
+        let image = snap(vm, "two-windows")?;
+        if image.pixel(20, 60) == Some([70, 130, 180])
+            && image.pixel(100, 100) == Some([180, 100, 65])
+        {
+            break image;
+        }
+        if Instant::now() > deadline {
+            return Err("two independent window pixels never appeared".into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let pin = -(image.width.max(image.height) as i64 + 64);
+    let click = |vm: &mut Vm| -> Result<(), String> {
+        send_events(vm, &[button_event("left", true)])?;
+        std::thread::sleep(Duration::from_millis(60));
+        send_events(vm, &[button_event("left", false)])
+    };
+    move_pointer(vm, pin, pin)?;
+    move_pointer(vm, 20, 60)?;
+    click(vm)?;
+    let from = w.read().len();
+    send_events(vm, &[key_event("a", true), key_event("a", false)])?;
+    w.wait(
+        "Colors received focused input",
+        Duration::from_secs(30),
+        |log| log[from..].contains("DEMO KEY Colors 30"),
+    )?;
+    if w.read()[from..].contains("DEMO KEY Input counter 30") {
+        return Err("unfocused client received the focused key".into());
+    }
+    // Drag the now-raised Colors title, exposing its old position.
+    move_pointer(vm, 10, -40)?; // 30,20
+    send_events(vm, &[button_event("left", true)])?;
+    std::thread::sleep(Duration::from_millis(100));
+    move_pointer(vm, 400, 230)?;
+    send_events(vm, &[button_event("left", false)])?;
+    let moved = loop {
+        let im = snap(vm, "moved")?;
+        if im.pixel(20, 60) == Some([29, 38, 59])
+            && im.pixel(450, 300).is_some_and(|p| p[1..] == [130, 180])
+        {
+            break im;
+        }
+        if Instant::now() > deadline {
+            return Err("move left artifacts or did not redraw".into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    // Resize from the bottom-right grip. The uncovered region must be clean.
+    move_pointer(vm, pin, pin)?;
+    move_pointer(vm, 650, 400)?;
+    send_events(vm, &[button_event("left", true)])?;
+    std::thread::sleep(Duration::from_millis(100));
+    move_pointer(vm, -150, -60)?;
+    send_events(vm, &[button_event("left", false)])?;
+    loop {
+        let im = snap(vm, "resized")?;
+        if im.pixel(620, 380) == Some([29, 38, 59])
+            && im.pixel(450, 300).is_some_and(|p| p[1..] == [130, 180])
+        {
+            break;
+        }
+        if Instant::now() > deadline {
+            return Err("resize left artifacts or did not redraw".into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Focus the other independent app, then deliberately panic it with F.
+    move_pointer(vm, pin, pin)?;
+    move_pointer(vm, 100, 100)?;
+    click(vm)?;
+    let from = w.read().len();
+    send_events(vm, &[key_event("f", true), key_event("f", false)])?;
+    w.wait(
+        "counter crash contained and peer closed",
+        Duration::from_secs(30),
+        |log| log[from..].contains("DISPLAY DISCONNECT 2; service alive"),
+    )?;
+    let from = w.read().len();
+    send_events(vm, &[key_event("b", true), key_event("b", false)])?;
+    w.wait(
+        "surviving application receives input",
+        Duration::from_secs(30),
+        |log| log[from..].contains("DEMO KEY Colors 48"),
+    )?;
+    let _ = moved;
+    snap(vm, "survivor")?;
+    send_events(vm, &[key_event("f4", true), key_event("f4", false)])?;
+    w.wait(
+        "display service exited for diagnostic handoff",
+        Duration::from_secs(30),
+        |log| log.contains("process exited: display (pid 1): exit code 0"),
+    )?;
+    loop {
+        let im = snap(vm, "diagnostic-handoff")?;
+        if count_color(&im.pixels, theme::CARD) >= 10000
+            && count_color(&im.pixels, theme::TITLE) >= 200
+            && count_color(&im.pixels, theme::PANEL) >= 50000
+        {
+            break;
+        }
+        if Instant::now() > deadline {
+            return Err("diagnostic framebuffer was not restored".into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let log = w.read();
+    if log.contains(markers::PANIC) || log.contains(markers::CPU_EXCEPTION) {
+        return Err("kernel failure during desktop checks".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -40,7 +40,25 @@ name = "fileprobe"
 test = false
 bench = false
 
+[[bin]]
+name = "display"
+test = false
+bench = false
+
+[[bin]]
+name = "colors"
+test = false
+bench = false
+
+[[bin]]
+name = "counter"
+test = false
+bench = false
+
 [dependencies]
+desktop = { path = "../desktop" }
+gfx.workspace = true
+mm.workspace = true
 ulib.workspace = true
 os-abi.workspace = true
 

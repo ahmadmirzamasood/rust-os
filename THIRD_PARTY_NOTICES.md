@@ -50,3 +50,10 @@ image.
 No automated license or advisory scan (for example `cargo deny`) is
 configured yet. Unsafe code and build scripts of guest dependencies have not
 been reviewed beyond identifying them.
+
+The experimental user-space display also links `gfx` and the same bitmap font.
+The font crate's MIT notice and Noto's OFL copyright/license are preserved in
+`licenses/noto-sans-mono-bitmap-MIT.txt` and `licenses/Noto-OFL.txt`.
+OFL source: https://raw.githubusercontent.com/notofonts/noto-fonts/main/LICENSE.
+Window controls and desktop symbols are original Rust drawing primitives under
+this project's MIT license; no external icon pack or branding is used.

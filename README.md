@@ -5,7 +5,7 @@ graphical desktop: Computer, Files and Trash icons, a taskbar, basic window
 management, file browsing, and shutdown/restart. The look aims for the
 clarity of GNOME and Pantheon without using their code or branding.
 
-**Status: isolated user processes and experimental storage.** There is no usable OS
+**Status: isolated user processes, experimental storage and software display.** There is no usable OS
 yet. In QEMU with UEFI firmware the kernel boots and logs each boot stage
 on the serial port. It installs CPU exception handling, validates the boot
 information, sets up physical-frame allocation, kernel page mappings with
@@ -18,7 +18,8 @@ system-call interface, handles and message channels. A crashing process is
 terminated without affecting the kernel or other processes. The screen
 shows a welcome card with a mouse pointer, an input-debug panel and a
 clickable test button. A bounded RAM/RSFS1 filesystem is accessible through
-validated user-space calls; there is no file manager or desktop yet.
+validated user-space calls. An opt-in user-space display runs two demo windows;
+there is no file manager yet.
 
 | Area | State |
 | --- | --- |
@@ -31,7 +32,7 @@ validated user-space calls; there is no file manager or desktop yet.
 | Interrupts, timer, PS/2 keyboard and mouse, pointer, input panel | Verified in QEMU by `cargo xtask smoke --scenario input` (Windows host; GitHub CI on Ubuntu): injected keys, pointer moves and clicks, queue overflow and recovery, timer vs host time; see [docs/architecture/interrupts-input.md](docs/architecture/interrupts-input.md). USB input is not supported |
 | Kernel threads, preemptive round-robin scheduler, idle thread | Verified in QEMU (Windows host, debug and release): on-boot scheduler self-test (never-yielding threads all progress and are preempted; join, sleep, yield; stacks reclaimed) |
 | User processes in ring 3: address spaces, static ELF loader, system calls, handles, channels, fault containment | Verified in QEMU by `cargo xtask smoke --scenario processes` (Windows host, debug and release, 10 repeated runs; also with `-cpu max`, SMEP/SMAP on): IPC, preemption of CPU-bound processes, 9 contained crash kinds including reads, writes and jumps into kernel memory, 78 invalid-argument checks; see [docs/architecture/processes.md](docs/architecture/processes.md). Also passes in GitHub CI on Ubuntu |
-| Desktop, Files, Trash, window manager | Not started (only a host-tested model) |
+| Software display and window manager | Opt-in ring-3 service and two demos; see [display.md](docs/architecture/display.md). Files/Trash GUI remains pending |
 | Storage and filesystem | Verified in QEMU 11.1.0 on Windows, debug and release: RAM/RSFS1, PIIX3 ATA PIO, user file calls, clean-shutdown persistence and corrupt-volume rejection. See [docs/FILESYSTEM.md](docs/FILESYSTEM.md) for limits and evidence |
 | Shutdown / restart | General power management not started; storage smoke has a restricted Q35 test power-off |
 | Sleep | Deliberately unavailable until real suspend/resume exists |
@@ -44,7 +45,7 @@ validated user-space calls; there is no file manager or desktop yet.
   crate (0.11.17). BIOS is not built.
 - QEMU first; VirtualBox and VMware later.
 - Modular monolithic kernel. User programs run in ring 3 in separate
-  address spaces; the desktop model is still trusted code in the kernel.
+  address spaces; the optional desktop service runs in a separate user process.
   Only programs built with the OS (the boot bundle) can run; this is not a
   platform for untrusted code yet.
 
@@ -82,7 +83,7 @@ crates/gfx/          no_std framebuffer drawing, bitmap text, boot screens (host
 crates/boot-data/    no_std boot-info validation and serial boot markers (host-tested)
 crates/mm/           no_std frame allocator, page-table mapper, heap (host-tested)
 crates/input/        no_std input rings, PS/2 decoders, pointer, event queue (host-tested)
-userspace/desktop/   no_std desktop shell model (host-tested)
+userspace/desktop/   no_std software display/window core and shell policy (host-tested)
 userspace/ulib/      no_std user-space support library (entry, syscalls, IPC)
 userspace/apps/      user programs: init (process/file tests), echo, spin, fault, abuse, fileprobe
 xtask/               host build tool: lint, test, build, image, run, smoke
@@ -112,3 +113,8 @@ are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 Licensed under the [MIT License](LICENSE).
+
+Experimental user-space software display: run `cargo xtask desktop --release`.
+The existing diagnostic boot remains available through `cargo xtask run`.
+See [display architecture and protocol](docs/architecture/display.md) for
+controls, limits, validation commands and the kernel/device boundary.

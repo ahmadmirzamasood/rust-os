@@ -47,7 +47,7 @@ impl TextStyle {
     }
 
     /// Glyph for `c`, falling back to `?` for characters outside the font.
-    pub(crate) fn glyph(self, c: char) -> Option<RasterizedChar> {
+    pub fn glyph(self, c: char) -> Option<RasterizedChar> {
         get_raster(c, self.weight(), self.raster_height())
             .or_else(|| get_raster('?', self.weight(), self.raster_height()))
     }

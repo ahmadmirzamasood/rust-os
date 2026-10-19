@@ -12,6 +12,9 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "apps"
 version = "0.0.0"
 dependencies = [
+ "desktop",
+ "gfx",
+ "mm",
  "os-abi",
  "ulib",
 ]
@@ -102,6 +105,7 @@ checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 name = "desktop"
 version = "0.0.0"
 dependencies = [
+ "gfx",
  "os-abi",
 ]
 

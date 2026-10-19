@@ -156,6 +156,12 @@ impl Ui {
         self.panel_dirty = true;
     }
 
+    /// Restore the complete diagnostic scene after a user display service exits.
+    pub fn invalidate_screen(&mut self) {
+        self.screen_dirty = true;
+        self.panel_dirty = true;
+    }
+
     /// Copy whatever changed to the framebuffer. Returns `false` if the
     /// framebuffer was busy (only possible while a panic is being reported).
     pub fn render(&mut self, status: &Status) -> bool {
@@ -181,12 +187,18 @@ impl Ui {
         let back = &self.back;
         let pointer = self.pointer;
         let drawn = display::with_canvas(|front| {
+            // The framebuffer lock disables preemption. Recheck ownership here:
+            // a service may have claimed it since the event-loop's earlier check.
+            if crate::display_device::active() {
+                return false;
+            }
             for rect in dirty.iter().flatten() {
                 front.blit_from(back, *rect);
             }
             cursor::draw(front, pointer.0, pointer.1);
+            true
         })
-        .is_some();
+        .unwrap_or(false);
         if drawn {
             self.screen_dirty = false;
             self.panel_dirty = false;

@@ -38,6 +38,7 @@
 //! calls check their condition and call `sched::block` with interrupts
 //! disabled in between, so a wake-up cannot be lost.
 
+pub mod display;
 pub mod files;
 pub mod loader;
 
@@ -96,6 +97,7 @@ struct Process {
     started_ns: u64,
     /// The kernel reports this process's exit as the process-test verdict.
     test_driver: bool,
+    display_service: bool,
 }
 
 impl Process {
@@ -112,6 +114,7 @@ impl Process {
         refs: 0,
         started_ns: 0,
         test_driver: false,
+        display_service: false,
     };
 
     fn lookup(&self, value: u64) -> Result<Object, Error> {
@@ -404,6 +407,7 @@ fn start(
             refs: u32::from(parent.is_some()),
             started_ns: time::uptime_ns(),
             test_driver,
+            display_service: cfg!(feature = "desktop") && parent.is_none() && name == b"display",
         };
         let mut child_handle = 0;
         let mut parent_handle = 0;
@@ -444,12 +448,18 @@ pub fn start_init(name: &str) -> Result<u32, StartError> {
     start(name.as_bytes(), None, 0, true).map(|(pid, _)| pid)
 }
 
+/// Start the bundled display as a boot service, without process-test reporting.
+pub fn start_display() -> Result<u32, StartError> {
+    start(b"display", None, 0, false).map(|(pid, _)| pid)
+}
+
 // --- Ending ----------------------------------------------------------------
 
 /// End the calling process with `status`. Never returns.
 pub fn exit_current(status: ExitStatus) -> ! {
     let pid = sched::current_pid();
     let thread = sched::current();
+    crate::display_device::release(pid);
     let stats = sched::stats(thread).unwrap_or_default();
     let ended = TABLE.with(|t| {
         let slot = t.slot_of(pid)?;

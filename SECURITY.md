@@ -29,3 +29,11 @@ recovery or power-loss guarantee. See [docs/FILESYSTEM.md](docs/FILESYSTEM.md).
 A private vulnerability-reporting channel has not been configured yet. Until
 the maintainer publishes one here, please do not post exploit details
 publicly; open an issue asking for a private contact instead.
+
+The optional `desktop` kernel variant authorizes only its root bundled display
+process to copy RGB scanlines and dequeue input. Window policy, surface buffers
+and composition run in ring 3. Channels establish client identities; no client
+shared-memory mappings exist. This remains a bounded prototype for bundled
+programs, with possible lost client input under channel backpressure and no
+service restart or adversarial security review. See
+[display boundary](docs/architecture/display.md).

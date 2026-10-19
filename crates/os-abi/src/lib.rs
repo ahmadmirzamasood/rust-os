@@ -78,7 +78,11 @@ pub mod syscall {
     pub const CHANNEL_RECV: u64 = 11;
 
     /// Number of defined calls (numbers are `0..COUNT`).
-    pub const COUNT: u64 = 22;
+    pub const COUNT: u64 = 25;
+    /// Bundled display only, desktop kernel: dimensions, RGB row copy, input packet.
+    pub const DISPLAY_INFO: u64 = 22;
+    pub const DISPLAY_ROW: u64 = 23;
+    pub const DISPLAY_INPUT: u64 = 24;
 
     /// `(path_ptr, path_len, flags) -> handle`; flags WRITE=1, CREATE=2.
     /// CREATE is exclusive and requires WRITE. Handles are process-owned.

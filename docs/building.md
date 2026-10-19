@@ -189,3 +189,14 @@ enabled; neither has been tried.
 
 Passing in QEMU will not be taken as evidence for VirtualBox or VMware; each
 gets its own recorded test.
+
+## Experimental display variant
+
+`cargo xtask desktop --release` boots the ring-3 display service and two demo
+applications. `cargo xtask smoke --scenario desktop` and the same command with
+`--release` test this variant with QMP input and screenshot checks. `smoke`
+now includes this ninth scenario. This variant's separate kernel/image paths
+use `target/fault-tests/desktop/` and `rust-os-uefi-desktop.img`; despite the
+historical directory name it is not a deliberate kernel-fault build.
+The normal `run` boot still exercises the original diagnostic UI and init tests.
+See [display.md](architecture/display.md) for the exact protocol and limits.
