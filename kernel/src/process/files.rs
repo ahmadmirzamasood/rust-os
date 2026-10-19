@@ -20,6 +20,7 @@ fn error(e: storage::Error) -> Error {
         E::Corrupt => Error::Corrupt,
         E::ReadOnly => Error::ReadOnly,
         E::NoMemory => Error::NoResources,
+        E::Busy => Error::WouldBlock,
     }
 }
 fn path(ptr: u64, len: u64) -> Result<alloc::string::String, Error> {
@@ -127,6 +128,7 @@ pub fn call(number: u64, a: u64, b: u64, c: u64, d: u64) -> Result<u64, Error> {
             volume::with(true, |fs| fs.rename(&from, &to)).map_err(error)?;
             Ok(0)
         }
+        nr::FS_SYNC_STEP => volume::sync_step().map(u64::from).map_err(error),
         nr::FS_SYNC => {
             volume::sync().map_err(error)?;
             Ok(0)

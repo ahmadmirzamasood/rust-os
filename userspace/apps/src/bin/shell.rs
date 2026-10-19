@@ -2,14 +2,18 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
+#[path = "../file_backend.rs"]
+mod file_backend;
 #[path = "../display_heap.rs"]
 mod heap;
 use alloc::vec::Vec;
 use core::fmt::Write;
+use desktop::files::Browser;
 use desktop::{
     display::{Action, Display, Event},
     shell::{PREF_PATH, Preferences, Shell},
 };
+use file_backend::GuestFs;
 use gfx::{Canvas, FmtBuf, Layout, PixelFormat};
 use ulib::{Error, fs};
 ulib::entry!(main);
@@ -31,25 +35,25 @@ fn saved() -> Preferences {
         .and_then(|n| Preferences::decode(&bytes[..n]))
         .unwrap_or_default()
 }
-fn paint(shell: &Shell, display: &mut Display, app: usize) {
-    let mut listing = [0; 8192];
-    let text = if app == 1 {
-        match fs::list("/", &mut listing) {
-            Ok(0) => "(empty volume)",
-            Ok(n) => core::str::from_utf8(&listing[..n]).unwrap_or("Unsupported filename encoding"),
-            Err(_) => "Volume listing unavailable",
-        }
+fn paint(shell: &Shell, display: &mut Display, app: usize, browsers: &[Browser; 2]) {
+    let text = if app == 1 || app == 2 {
+        browsers[app - 1].lines().join("\n")
     } else {
-        ""
+        alloc::string::String::new()
     };
-    if let Err(e) = shell.paint(display, app, text) {
+    if let Err(e) = shell.paint(display, app, &text) {
         ulib::println!("SHELL PAINT {:?}", e);
     }
 }
-fn launch(shell: &mut Shell, display: &mut Display, app: usize) {
+fn launch(shell: &mut Shell, display: &mut Display, app: usize, browsers: &mut [Browser; 2]) {
     match shell.launch(display, app) {
         Ok(()) => {
-            paint(shell, display, app);
+            if (app == 1 || app == 2)
+                && let Err(e) = browsers[app - 1].refresh(&mut GuestFs)
+            {
+                browsers[app - 1].report(e);
+            }
+            paint(shell, display, app, browsers);
             ulib::println!("SHELL LAUNCH {}", app);
         }
         Err(e) => {
@@ -80,6 +84,7 @@ fn run() -> ulib::Result<()> {
         shell.preferences.warm,
         shell.persistent
     );
+    let mut browsers = [Browser::new(false), Browser::new(true)];
     let mut pointer = (width as i32 / 2, height as i32 / 2);
     let mut drag = None;
     let mut last_second = u64::MAX;
@@ -96,6 +101,15 @@ fn run() -> ulib::Result<()> {
             let mut event = None;
             match p[0] {
                 1 if p[1] != 0 => match x {
+                    0x01 if display
+                        .focus()
+                        .and_then(|id| shell.app_for(id))
+                        .is_some_and(|app| {
+                            (app == 1 || app == 2) && browsers[app - 1].captures_escape()
+                        }) =>
+                    {
+                        event = display.key(x as u32, true);
+                    }
                     0x01 => {
                         shell.menu = !shell.menu;
                         shell.selection = 0;
@@ -105,7 +119,7 @@ fn run() -> ulib::Result<()> {
                     }
                     0x1c if shell.menu => {
                         let app = shell.selection;
-                        launch(&mut shell, &mut display, app);
+                        launch(&mut shell, &mut display, app, &mut browsers);
                     }
                     0x0f => {
                         let _ = shell.switch(&mut display);
@@ -153,7 +167,12 @@ fn run() -> ulib::Result<()> {
                     }
                     if shell.menu {
                         if (16..310).contains(&x) && (48..218).contains(&y) {
-                            launch(&mut shell, &mut display, ((y - 48) / 34) as usize);
+                            launch(
+                                &mut shell,
+                                &mut display,
+                                ((y - 48) / 34) as usize,
+                                &mut browsers,
+                            );
                         } else {
                             shell.menu = false;
                         }
@@ -182,7 +201,12 @@ fn run() -> ulib::Result<()> {
                             event = None;
                         }
                     } else if (16..112).contains(&x) && (72..372).contains(&y) {
-                        launch(&mut shell, &mut display, ((y - 72) / 100) as usize);
+                        launch(
+                            &mut shell,
+                            &mut display,
+                            ((y - 72) / 100) as usize,
+                            &mut browsers,
+                        );
                     }
                 }
                 4 => {
@@ -192,6 +216,33 @@ fn run() -> ulib::Result<()> {
                 _ => {}
             }
             if let Some(d) = event {
+                if let Some(app) = shell.app_for(d.window) {
+                    if app == 0
+                        && matches!(
+                            d.event,
+                            Event::Key {
+                                code: 0x1c,
+                                pressed: true
+                            } | Event::Pointer { pressed: true, .. }
+                        )
+                    {
+                        launch(&mut shell, &mut display, 1, &mut browsers);
+                    }
+                    if app == 1 || app == 2 {
+                        let browser = &mut browsers[app - 1];
+                        match d.event {
+                            Event::Key {
+                                code,
+                                pressed: true,
+                            } => browser.key(&mut GuestFs, code),
+                            Event::Pointer {
+                                y, pressed: true, ..
+                            } => browser.click(&mut GuestFs, y),
+                            _ => {}
+                        }
+                        paint(&shell, &mut display, app, &browsers);
+                    }
+                }
                 if shell.activate(&mut display, d.window, d.event) {
                     let result = (|| {
                         let f = match fs::File::open(PREF_PATH, true, false) {
@@ -210,10 +261,39 @@ fn run() -> ulib::Result<()> {
                         Err(_) => "Applied; saving failed",
                     };
                     ulib::println!("SHELL PREFERENCE {} {:?}", shell.preferences.warm, result);
-                    paint(&shell, &mut display, 3);
+                    paint(&shell, &mut display, 3, &browsers);
                 }
                 if let Event::Key { .. } = d.event {
                     ulib::println!("SHELL KEY window {}", d.window);
+                }
+            }
+        }
+        for i in 0..2 {
+            let previous = browsers[i].status.clone();
+            let mut changed = false;
+            let io_start = ulib::clock_ns();
+            // Return to input/composition after 4 ms of work or 64 steps.
+            // One device request can still take the driver's bounded timeout.
+            for _ in 0..64 {
+                if !browsers[i].tick(&mut GuestFs) {
+                    break;
+                }
+                changed = true;
+                if ulib::clock_ns().saturating_sub(io_start) >= 4_000_000 {
+                    break;
+                }
+            }
+            if changed {
+                if previous != browsers[i].status || !browsers[i].busy() {
+                    ulib::println!("FILES {} {}", i, browsers[i].status);
+                    paint(&shell, &mut display, i + 1, &browsers);
+                }
+                if !browsers[i].busy() {
+                    let other = 1 - i;
+                    if let Err(e) = browsers[other].refresh(&mut GuestFs) {
+                        browsers[other].report(e);
+                    }
+                    paint(&shell, &mut display, other + 1, &browsers);
                 }
             }
         }

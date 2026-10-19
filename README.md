@@ -18,7 +18,7 @@ system-call interface, handles and message channels. A crashing process is
 terminated without affecting the kernel or other processes. The screen
 shows a welcome card with a mouse pointer, an input-debug panel and a
 clickable test button. A bounded RAM/RSFS1 filesystem is accessible through
-validated user-space calls. The interactive command boots a user-space desktop with built-in views and a read-only root file listing.
+validated user-space calls. The interactive command boots a user-space desktop with built-in views and bounded Files/Trash operations (see [Files](docs/files.md)).
 
 | Area | State |
 | --- | --- |
@@ -31,7 +31,7 @@ validated user-space calls. The interactive command boots a user-space desktop w
 | Interrupts, timer, PS/2 keyboard and mouse, pointer, input panel | Verified in QEMU by `cargo xtask smoke --scenario input` (Windows host; GitHub CI on Ubuntu): injected keys, pointer moves and clicks, queue overflow and recovery, timer vs host time; see [docs/architecture/interrupts-input.md](docs/architecture/interrupts-input.md). USB input is not supported |
 | Kernel threads, preemptive round-robin scheduler, idle thread | Verified in QEMU (Windows host, debug and release): on-boot scheduler self-test (never-yielding threads all progress and are preempted; join, sleep, yield; stacks reclaimed) |
 | User processes in ring 3: address spaces, static ELF loader, system calls, handles, channels, fault containment | Verified in QEMU by `cargo xtask smoke --scenario processes` (Windows host, debug and release, 10 repeated runs; also with `-cpu max`, SMEP/SMAP on): IPC, preemption of CPU-bound processes, 9 contained crash kinds including reads, writes and jumps into kernel memory, 78 invalid-argument checks; see [docs/architecture/processes.md](docs/architecture/processes.md). Also passes in GitHub CI on Ubuntu |
-| Software display and desktop | Ring-3 shell, launcher, built-in views and saved accent; see [desktop.md](docs/desktop.md). Trash operations remain unavailable |
+| Software display and desktop | Ring-3 shell, launcher, built-in views and saved accent; see [desktop.md](docs/desktop.md). Files/Trash controls and limits are in [files.md](docs/files.md) |
 | Storage and filesystem | Verified in QEMU 11.1.0 on Windows, debug and release: RAM/RSFS1, PIIX3 ATA PIO, user file calls, clean-shutdown persistence and corrupt-volume rejection. See [docs/FILESYSTEM.md](docs/FILESYSTEM.md) for limits and evidence |
 | Shutdown / restart | General power management not started; storage smoke has a restricted Q35 test power-off |
 | Sleep | Deliberately unavailable until real suspend/resume exists |

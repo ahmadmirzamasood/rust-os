@@ -62,3 +62,14 @@ pub fn persistent() -> Result<bool> {
         Volume::Failed(e) => Err(*e),
     }
 }
+
+/// One bounded device transfer; release the lock between calls so display/input
+/// can run. DiskFs freezes mutations until the shared writeback finishes.
+pub fn sync_step() -> Result<bool> {
+    let mut v = VOLUME.try_lock().ok_or(Error::Io)?;
+    match v.as_mut().ok_or(Error::Io)? {
+        Volume::Ram(_) => Ok(true),
+        Volume::Disk(d) => d.sync_step(),
+        Volume::Failed(e) => Err(*e),
+    }
+}

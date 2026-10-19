@@ -136,25 +136,10 @@ impl Shell {
                 },
                 "64 entries, 4096 bytes per file",
                 "Shared by bundled applications",
-                "Open Files from Applications or desktop",
+                "Enter / click to browse mounted /",
                 "",
             ],
-            1 => [
-                "Files / (read-only browser)",
-                "Directories end in /",
-                listing,
-                "",
-                "Refresh: close and reopen Files",
-                "File editing is unavailable",
-            ],
-            2 => [
-                "Trash is unavailable",
-                "Move-to-trash and restore are not",
-                "implemented for this volume.",
-                "No files have been removed.",
-                "",
-                "",
-            ],
+            1 | 2 => [listing, "", "", "", "", ""],
             3 => [
                 "Desktop appearance",
                 if self.preferences.warm {

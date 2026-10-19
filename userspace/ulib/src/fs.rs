@@ -79,3 +79,8 @@ pub fn persistent() -> Result<bool> {
 pub fn test_shutdown() -> Result<()> {
     call(nr::FS_TEST_SHUTDOWN, 0, 0, 0, 0).map(drop)
 }
+
+/// Cooperatively flush one sector; keep polling until complete or error.
+pub fn sync_step() -> Result<bool> {
+    call(nr::FS_SYNC_STEP, 0, 0, 0, 0).map(|n| n == 1)
+}
