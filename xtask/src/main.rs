@@ -5,6 +5,7 @@ mod qemu;
 mod smoke;
 mod storage_test;
 mod user;
+mod vm_images;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -53,6 +54,8 @@ commands:
                   ramdisk is the program bundle (network on first run)
   desktop         boot the graphical desktop shell
   shell-smoke     disposable disk: shell navigation and reboot preferences
+  power-smoke     focused desktop cancel/restart/shutdown and saved-byte checks
+  vm-images       shell raw/VDI/VMDK images; conversion is not VM validation
   run             boot the graphical desktop in QEMU
   diagnostics     boot the original diagnostic UI and process tests
   smoke           boot smoke test in headless QEMU: serial markers + screenshot check
@@ -94,12 +97,14 @@ fn main() -> ExitCode {
         "build" => build_kernel(&options, KernelVariant::Normal).map(drop),
         "user" => user::build_bundle(&options).map(drop),
         "image" => build_image(&options, KernelVariant::Normal).map(drop),
+        "vm-images" => vm_images::run(&options),
         "run" => run(&options, KernelVariant::FaultTest("shell")),
         "diagnostics" => run(&options, KernelVariant::Normal),
         "desktop" => run(&options, KernelVariant::FaultTest("shell")),
         "smoke" => smoke(&options),
         "storage-smoke" => storage_test::run(&options),
         "shell-smoke" => smoke::shell_run(&options),
+        "power-smoke" => smoke::power_run(&options),
         "check-private" => check_private(),
         "ci" => lint()
             .and_then(|()| test())
@@ -315,6 +320,7 @@ fn run(options: &Options, variant: KernelVariant) -> Result<(), String> {
 
     let mut cmd = qemu::base_command(&qemu, &firmware, vars.as_deref(), &image);
     if variant == KernelVariant::FaultTest("shell") {
+        cmd = qemu::enable_power(cmd);
         // A fixed project-owned regular image, never a caller-supplied host disk.
         // Create exclusively once; the guest rejects corruption without formatting.
         let data_dir = workspace_root().join("target/desktop-data");

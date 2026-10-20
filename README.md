@@ -33,9 +33,9 @@ validated user-space calls. The interactive command boots a user-space desktop w
 | User processes in ring 3: address spaces, static ELF loader, system calls, handles, channels, fault containment | Verified in QEMU by `cargo xtask smoke --scenario processes` (Windows host, debug and release, 10 repeated runs; also with `-cpu max`, SMEP/SMAP on): IPC, preemption of CPU-bound processes, 9 contained crash kinds including reads, writes and jumps into kernel memory, 78 invalid-argument checks; see [docs/architecture/processes.md](docs/architecture/processes.md). Also passes in GitHub CI on Ubuntu |
 | Software display and desktop | Ring-3 shell, launcher, built-in views and saved accent; see [desktop.md](docs/desktop.md). Files/Trash controls and limits are in [files.md](docs/files.md) |
 | Storage and filesystem | Verified in QEMU 11.1.0 on Windows, debug and release: RAM/RSFS1, PIIX3 ATA PIO, user file calls, clean-shutdown persistence and corrupt-volume rejection. See [docs/FILESYSTEM.md](docs/FILESYSTEM.md) for limits and evidence |
-| Shutdown / restart | General power management not started; storage smoke has a restricted Q35 test power-off |
+| Shutdown / restart | Verified in QEMU 11.1.0, debug and release: coordinated desktop actions, real guest restart/S5 exit and exact saved bytes; see [power and VM evidence](docs/power.md) |
 | Sleep | Deliberately unavailable until real suspend/resume exists |
-| VirtualBox / VMware | Planned, untested |
+| VirtualBox / VMware | Converted image packaging available; boot, devices and power unverified |
 
 ## Target
 

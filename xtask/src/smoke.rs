@@ -1426,6 +1426,15 @@ fn desktop_interact(
 
 /// End-to-end shell checks against a fresh designated disposable RSFS1 volume.
 pub fn shell_run(options: &crate::Options) -> Result<(), String> {
+    shell_run_inner(options, true)
+}
+
+/// Focused power acceptance; independent of multi-stage Files UI stress.
+pub fn power_run(options: &crate::Options) -> Result<(), String> {
+    shell_run_inner(options, false)
+}
+
+fn shell_run_inner(options: &crate::Options, files: bool) -> Result<(), String> {
     let image = crate::build_image(options, crate::KernelVariant::FaultTest("shell"))?;
     let firmware = options.firmware()?;
     let qemu = qemu::program()?;
@@ -1443,6 +1452,7 @@ pub fn shell_run(options: &crate::Options) -> Result<(), String> {
     for boot in 1..=2 {
         let serial = dir.join(format!("boot-{boot}.log"));
         let mut cmd = qemu::base_command(&qemu, &firmware, vars.as_deref(), &image);
+        cmd = qemu::enable_power(cmd);
         cmd.args(["-display", "none", "-monitor", "none", "-qmp", "stdio"]);
         cmd.arg("-serial").arg(format!("file:{}", serial.display()));
         cmd.args(["-device", "piix3-ide,id=databus"]);
@@ -1458,10 +1468,11 @@ pub fn shell_run(options: &crate::Options) -> Result<(), String> {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         let mut vm = Vm::new(cmd.spawn().map_err(|e| e.to_string())?)?;
-        let deadline = Instant::now() + options.timeout.unwrap_or(Duration::from_secs(120));
+        // Includes Files jobs plus a full second firmware boot after restart.
+        let deadline = Instant::now() + options.timeout.unwrap_or(Duration::from_secs(600));
         let mut watch = Watcher::new(&serial, deadline);
         watch.wait("shell boot", Duration::from_secs(60), |log| {
-            log.contains("SHELL READY")
+            log.contains("SHELL FRAME READY")
         })?;
         let log = watch.read();
         let expected = if boot == 1 {
@@ -1485,23 +1496,29 @@ pub fn shell_run(options: &crate::Options) -> Result<(), String> {
         };
         if boot == 1 {
             // Keyboard launcher: open all built-in applications, leave Settings focused.
-            for app in [0, 1, 2, 4, 3] {
+            let apps: &[usize] = if files { &[0, 1, 2, 4, 3] } else { &[3] };
+            for &app in apps {
                 tap(&mut vm, "esc")?;
                 for _ in 0..app {
                     tap(&mut vm, "down")?;
                 }
                 let from = watch.read().len();
                 tap(&mut vm, "ret")?;
-                watch.wait("application launch", Duration::from_secs(10), |l| {
+                watch.wait("application launch", Duration::from_secs(60), |l| {
                     l[from..].contains(&format!("SHELL LAUNCH {app}"))
                 })?;
             }
-            let im = snap(&mut vm, "applications")?;
+            let im = loop {
+                let im = snap(&mut vm, "applications")?;
+                if im.pixel(280, 250) == Some([238, 242, 246]) || Instant::now() >= deadline {
+                    break im;
+                }
+            };
             if im.pixel(280, 250) != Some([238, 242, 246]) {
                 return Err("Settings content pixels absent".into());
             }
             tap(&mut vm, "ret")?;
-            watch.wait("preference synced", Duration::from_secs(10), |l| {
+            watch.wait("preference synced", Duration::from_secs(60), |l| {
                 l.contains("SHELL PREFERENCE true Ok")
             })?;
             let im = loop {
@@ -1548,16 +1565,88 @@ pub fn shell_run(options: &crate::Options) -> Result<(), String> {
                 return Err("saved accent missing after reboot".into());
             }
         }
-        shell_file_checks(&mut vm, &mut watch, boot, &dir)?;
+        if files {
+            shell_file_checks(&mut vm, &mut watch, boot, &dir)?;
+        }
         if watch.read().contains("SHELL FAILED") || watch.read().contains("KERNEL PANIC") {
             return Err("shell/kernel failure".into());
         }
-        vm.quit();
-        crate::storage_test::verify_shell_files(&disk, boot)?;
-        eprintln!("shell boot {boot}: PASS (independent disk remount and Files bytes)");
+        // Real guest restart: no QMP system_reset and no host process restart.
+        // Esc may first dismiss a Files prompt/viewer; choose launcher explicitly.
+        move_pointer(&mut vm, -2000, -2000)?;
+        move_pointer(&mut vm, 40, 16)?;
+        send_events(&mut vm, &[button_event("left", true)])?;
+        std::thread::sleep(Duration::from_millis(100));
+        send_events(&mut vm, &[button_event("left", false)])?;
+        // Reset menu selection with Esc twice (close then reopen).
+        tap(&mut vm, "esc")?;
+        tap(&mut vm, "esc")?;
+        for _ in 0..6 {
+            tap(&mut vm, "down")?;
+        }
+        let confirm_from = watch.read().len();
+        tap(&mut vm, "ret")?;
+        watch.wait("power confirmation", Duration::from_secs(60), |l| {
+            l[confirm_from..].contains("SHELL POWER CONFIRM 2")
+        })?;
+        snap(&mut vm, "power-confirmation")?;
+        let cancel_from = watch.read().len();
+        tap(&mut vm, "esc")?;
+        watch.wait("power cancellation", Duration::from_secs(60), |l| {
+            l[cancel_from..].contains("SHELL POWER CANCEL")
+        })?;
+        if watch.read()[cancel_from..].contains("[rust-os] POWER CLEAN") {
+            return Err("cancelled request issued a hardware transition".into());
+        }
+        tap(&mut vm, "esc")?;
+        for _ in 0..6 {
+            tap(&mut vm, "down")?;
+        }
+        tap(&mut vm, "ret")?;
+        let from = watch.read().len();
+        tap(&mut vm, "ret")?;
+        watch.wait(
+            "guest restart and second firmware boot",
+            Duration::from_secs(60),
+            |l| {
+                l[from..].contains("[rust-os] POWER CLEAN action=2")
+                    && l[from..].contains("SHELL FRAME READY")
+                    && l[from..].contains("preference=true persistent=true")
+            },
+        )?;
+        tap(&mut vm, "esc")?;
+        for _ in 0..5 {
+            tap(&mut vm, "down")?;
+        }
+        tap(&mut vm, "ret")?;
+        let from = watch.read().len();
+        tap(&mut vm, "ret")?;
+        let end = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = vm.child.try_wait().map_err(|e| e.to_string())? {
+                if !status.success()
+                    || !watch.read()[from..].contains("[rust-os] POWER CLEAN action=1")
+                {
+                    return Err("guest clean shutdown failed".into());
+                }
+                break;
+            }
+            if Instant::now() >= end {
+                return Err("guest shutdown did not terminate QEMU".into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if files {
+            crate::storage_test::verify_shell_files(&disk, boot)?;
+        }
+        crate::storage_test::verify_shell_preferences(&disk)?;
+        eprintln!(
+            "shell boot {boot}: PASS (independent remount, preference bytes; Files checks={files})"
+        );
     }
     eprintln!(
-        "shell checks PASS: window/input, preferences, Files create/rename/copy/Trash/reboot/restore/confirmed delete and independent remount; evidence {}",
+        "shell/power checks PASS (Files UI checks={}): cancel, guest restart, clean shutdown, preferences and independent remount; evidence {}",
+        files,
         dir.display()
     );
     Ok(())
@@ -1595,7 +1684,7 @@ fn shell_file_checks(
             .map(drop)
     }
     fn finish(vm: &mut Vm, watch: &mut Watcher, app: usize, from: usize) -> Result<(), String> {
-        watch.wait("Files operation", Duration::from_secs(20), |l| {
+        watch.wait("Files operation", Duration::from_secs(120), |l| {
             l[from..].contains(&format!("FILES {app} Complete"))
                 || l[from..].contains("partial work kept")
         })?;

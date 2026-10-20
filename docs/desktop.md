@@ -16,8 +16,9 @@ processes remain supported by the display demo, but runtime executable discovery
 and third-party application installation are unavailable.
 
 Click desktop icons or Applications to launch. The Applications menu also shows
-Shut Down, Restart and Sleep in disabled text: the kernel has no general power
-capability API. Its restricted storage-test shutdown is not a desktop capability.
+Shut Down and Restart when the kernel detects supported Q35 power hardware.
+Both require confirmation. Sleep stays disabled with a missing-resume explanation.
+See [power coordination, VM configurations and evidence](power.md).
 Esc toggles the menu, Up/Down move the visible selection, and Enter launches.
 Tab switches between open applications and restores minimized ones. F1 minimizes,
 F2 restores, F3 closes the focused application. Title controls minimize, maximize
@@ -44,7 +45,8 @@ volume, including this preference file.
 the shell, drives keyboard launches and window lifecycle, clicks a desktop icon,
 checks content/background pixels, changes and syncs the accent, exits QEMU, and
 boots again to check the loaded value and pixels. This tests an explicit sync
-followed by a new VM boot; it does not claim guest restart/power controls work.
+followed by guest restart and clean shutdown, then a new VM boot. Current power
+test results and limits are recorded in [power.md](power.md).
 Evidence is under `target/shell-test/<profile>-<unique-id>/`.
 `cargo xtask ci` checks policy/protocol tests and bare-metal builds/lints;
 `cargo xtask smoke` retains boot, fault, input, process and demo regressions.
@@ -70,7 +72,7 @@ passed both VM boots in each profile. `cargo xtask run --release --headless
 | Normal navigation needs no terminal | Launcher, window controls, task strip and Settings available in the GUI |
 
 These gates apply to the bounded built-in desktop. General-purpose storage,
-power management, independent built-in application processes and compatibility
+general ACPI power management, independent built-in application processes and compatibility
 with other hypervisors or physical hardware remain unverified or unimplemented.
 
 The existing regression suite also passed all nine scenarios in both debug and

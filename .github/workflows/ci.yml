@@ -55,8 +55,10 @@ jobs:
         run: cargo xtask smoke
       - name: Disposable storage persistence and malformed-volume tests
         run: cargo xtask storage-smoke
-      - name: Graphical shell navigation and preference reboot test
+      - name: Graphical shell navigation, persistence and desktop power test
         run: cargo xtask shell-smoke
+      - name: Desktop shutdown, restart and persistence (release)
+        run: cargo xtask power-smoke --release
       - name: Show serial logs
         if: always()
         run: |

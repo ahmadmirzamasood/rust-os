@@ -1,6 +1,10 @@
 //! Copy-only display device. Only the bundled display service is authorized.
 use crate::{Result, call};
 use os_abi::syscall as nr;
+/// Query (0), shutdown (1), restart (2); root shell only. Never suspends.
+pub fn power(action: u64) -> Result<u64> {
+    call(nr::POWER, action, 0, 0, 0)
+}
 pub fn dimensions() -> Result<(usize, usize)> {
     call(nr::DISPLAY_INFO, 0, 0, 0, 0).map(|v| (v as u32 as usize, (v >> 32) as usize))
 }

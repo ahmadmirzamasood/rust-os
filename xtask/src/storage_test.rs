@@ -188,6 +188,23 @@ pub(crate) fn fresh_disk(path: &Path) -> Result<(), String> {
 }
 
 /// Independently remount only the disposable image created by shell_run.
+pub fn verify_shell_preferences(path: &Path) -> Result<(), String> {
+    let image = File::open(path).map_err(|e| e.to_string())?;
+    let fs = DiskFs::mount(Image(image)).map_err(|e| format!("power remount: {e:?}"))?;
+    let id = fs
+        .lookup("/desktop.pref")
+        .map_err(|e| format!("preference: {e:?}"))?
+        .0;
+    let mut bytes = [0; 6];
+    let n = fs
+        .read(id, 0, &mut bytes)
+        .map_err(|e| format!("preference read: {e:?}"))?;
+    if &bytes[..n] != b"RSP1\x01" {
+        return Err("power lost saved preference bytes".into());
+    }
+    Ok(())
+}
+
 pub fn verify_shell_files(path: &Path, boot: usize) -> Result<(), String> {
     let image = File::open(path).map_err(|e| e.to_string())?;
     let fs = DiskFs::mount(Image(image)).map_err(|e| format!("shell remount: {e:?}"))?;

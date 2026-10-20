@@ -78,7 +78,10 @@ pub mod syscall {
     pub const CHANNEL_RECV: u64 = 11;
 
     /// Number of defined calls (numbers are `0..COUNT`).
-    pub const COUNT: u64 = 26;
+    pub const COUNT: u64 = 27;
+    /// Root shell only: 0 queries bits (shutdown=1, restart=2); 1 shuts down,
+    /// 2 restarts after final flush. Other actions/reserved arguments rejected.
+    pub const POWER: u64 = 26;
     /// One writeback sector/flush; returns 1 when complete, 0 while pending.
     /// Mutations return WouldBlock during writeback; reads remain available.
     pub const FS_SYNC_STEP: u64 = 25;

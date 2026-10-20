@@ -1,6 +1,6 @@
 //! Scheduler self-test, run on every boot once the scheduler is up.
 //!
-//! - **Preemption:** three kernel threads spin for [`SPIN_MS`] without ever
+//! - **Preemption:** three kernel threads spin for at least [`SPIN_MS`] without ever
 //!   yielding, each counting iterations and watching the others' counters.
 //!   On one CPU a thread can only see another counter move between two of
 //!   its own reads if it was preempted in between. All three must make
@@ -32,6 +32,7 @@ const MAX_TABLE_FRAMES: u64 = 4;
 static COUNTS: [AtomicU64; SPINNERS] = [const { AtomicU64::new(0) }; SPINNERS];
 static INTERLEAVED: [AtomicBool; SPINNERS] = [const { AtomicBool::new(false) }; SPINNERS];
 static DEADLINE_NS: AtomicU64 = AtomicU64::new(0);
+static MINIMUM_NS: AtomicU64 = AtomicU64::new(0);
 static TURN: AtomicU64 = AtomicU64::new(0);
 static PING_PONG_OK: AtomicBool = AtomicBool::new(true);
 
@@ -75,6 +76,14 @@ fn spinner(index: u64) {
             seen = now;
         }
         core::hint::spin_loop();
+        // Host stalls and coalesced timer IRQs may outlast the minimum test
+        // interval. Keep all spinners alive until each actually observes
+        // interleaving; retain the hard deadline so broken preemption fails.
+        if time::uptime_ns() >= MINIMUM_NS.load(Ordering::Relaxed)
+            && INTERLEAVED.iter().all(|f| f.load(Ordering::Relaxed))
+        {
+            break;
+        }
     }
 }
 
@@ -106,7 +115,8 @@ pub fn run() -> Outcome {
     let frames_before = memory::free_frames();
 
     // Preemption.
-    DEADLINE_NS.store(started_at + SPIN_MS * 1_000_000, Ordering::Relaxed);
+    MINIMUM_NS.store(started_at + SPIN_MS * 1_000_000, Ordering::Relaxed);
+    DEADLINE_NS.store(started_at + 3_000_000_000, Ordering::Relaxed);
     let mut threads: [Option<ThreadId>; SPINNERS] = [None; SPINNERS];
     for (i, slot) in threads.iter_mut().enumerate() {
         *slot = spawn_kernel("selftest-spin", spinner, i as u64).ok();

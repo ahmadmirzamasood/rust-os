@@ -41,6 +41,7 @@
 pub mod display;
 pub mod files;
 pub mod loader;
+pub mod power;
 
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};

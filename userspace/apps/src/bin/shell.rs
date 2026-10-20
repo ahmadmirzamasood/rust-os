@@ -46,6 +46,14 @@ fn paint(shell: &Shell, display: &mut Display, app: usize, browsers: &[Browser; 
     }
 }
 fn launch(shell: &mut Shell, display: &mut Display, app: usize, browsers: &mut [Browser; 2]) {
+    if app >= 5 {
+        let action = (app - 4) as u64;
+        shell.request_power(action, browsers.iter().any(Browser::captures_escape));
+        if shell.power_confirm.is_some() {
+            ulib::println!("SHELL POWER CONFIRM {}", action);
+        }
+        return;
+    }
     match shell.launch(display, app) {
         Ok(()) => {
             if (app == 1 || app == 2)
@@ -77,6 +85,8 @@ fn run() -> ulib::Result<()> {
     let mut display = Display::new(width as u32, height as u32).map_err(|_| Error::NoResources)?;
     // A mount failure must not be labelled as a temporary RAM volume.
     let mut shell = Shell::new(saved(), fs::persistent()?);
+    shell.power_bits = ulib::display::power(0).unwrap_or(0);
+    ulib::println!("SHELL POWER CAPABILITIES {}", shell.power_bits);
     ulib::println!(
         "SHELL READY {}x{} preference={} persistent={}",
         width,
@@ -88,6 +98,8 @@ fn run() -> ulib::Result<()> {
     let mut pointer = (width as i32 / 2, height as i32 / 2);
     let mut drag = None;
     let mut last_second = u64::MAX;
+    let mut first_frame = true;
+    let mut power_wait: Option<(u64, u64)> = None;
     loop {
         for _ in 0..64 {
             let p = match ulib::display::input() {
@@ -98,6 +110,25 @@ fn run() -> ulib::Result<()> {
             let x = i32::from_le_bytes(p[4..8].try_into().unwrap());
             let y = i32::from_le_bytes(p[8..12].try_into().unwrap());
             display.invalidate();
+            if power_wait.is_some() {
+                continue;
+            }
+            if let Some(action) = shell.power_confirm {
+                if p[0] == 1 && p[1] != 0 {
+                    if x == 0x01 {
+                        shell.power_confirm = None;
+                        shell.power_notice = false;
+                        ulib::println!("SHELL POWER CANCEL");
+                    }
+                    if x == 0x1c {
+                        shell.power_confirm = None;
+                        power_wait = Some((action, ulib::clock_ns().saturating_add(5_000_000_000)));
+                        shell.status = "Stopping work; waiting for file jobs (5 seconds)";
+                        ulib::println!("SHELL POWER REQUEST {}", action);
+                    }
+                }
+                continue;
+            }
             let mut event = None;
             match p[0] {
                 1 if p[1] != 0 => match x {
@@ -115,7 +146,7 @@ fn run() -> ulib::Result<()> {
                         shell.selection = 0;
                     }
                     0xe048 | 0xe050 if shell.menu => {
-                        shell.selection = (shell.selection + if x == 0xe048 { 4 } else { 1 }) % 5;
+                        shell.selection = (shell.selection + if x == 0xe048 { 7 } else { 1 }) % 8;
                     }
                     0x1c if shell.menu => {
                         let app = shell.selection;
@@ -166,7 +197,7 @@ fn run() -> ulib::Result<()> {
                         continue;
                     }
                     if shell.menu {
-                        if (16..310).contains(&x) && (48..218).contains(&y) {
+                        if (16..310).contains(&x) && (48..320).contains(&y) {
                             launch(
                                 &mut shell,
                                 &mut display,
@@ -260,6 +291,7 @@ fn run() -> ulib::Result<()> {
                         Ok(()) => "Applied for this boot (temporary RAM)",
                         Err(_) => "Applied; saving failed",
                     };
+                    shell.unsaved_preferences = result.is_err();
                     ulib::println!("SHELL PREFERENCE {} {:?}", shell.preferences.warm, result);
                     paint(&shell, &mut display, 3, &browsers);
                 }
@@ -297,6 +329,23 @@ fn run() -> ulib::Result<()> {
                 }
             }
         }
+        if let Some((action, deadline)) = power_wait {
+            if ulib::clock_ns() >= deadline {
+                power_wait = None;
+                shell.status = "Power cancelled: application did not finish within 5 seconds";
+                display.invalidate();
+            } else if !browsers.iter().any(Browser::busy) {
+                // Built-in views have no document editor. Dialogs were vetoed
+                // before confirmation; queued operations have now acknowledged exit.
+                // In-kernel services have no queued writes beyond the volume cache.
+                ulib::println!("SHELL POWER APPS READY");
+                let result = ulib::display::power(action);
+                ulib::println!("SHELL POWER FAILED {:?}", result);
+                power_wait = None;
+                shell.status = "Power cancelled: flush, platform or another process failed";
+                display.invalidate();
+            }
+        }
         let seconds = ulib::clock_ns() / 1_000_000_000;
         if seconds != last_second {
             display.invalidate();
@@ -322,6 +371,10 @@ fn run() -> ulib::Result<()> {
                     ulib::display::row(y, &row[..line.len()])?;
                     old.copy_from_slice(&row[..line.len()]);
                 }
+            }
+            if first_frame {
+                ulib::println!("SHELL FRAME READY");
+                first_frame = false;
             }
         }
         ulib::sleep_ms(16);
