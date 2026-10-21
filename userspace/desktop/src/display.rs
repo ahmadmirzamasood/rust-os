@@ -495,14 +495,26 @@ impl Display {
 
     /// Compose into the caller's off-screen canvas. `true` means it must be
     /// presented. Invalid target geometry does not consume pending damage.
+    pub fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
     pub fn render(&mut self, canvas: &mut Canvas<'_>) -> Result<bool, Error> {
+        self.render_with(canvas, |c| c.clear(Rgb::new(29, 38, 59)))
+    }
+
+    pub fn render_with(
+        &mut self,
+        canvas: &mut Canvas<'_>,
+        background: impl FnOnce(&mut Canvas<'_>),
+    ) -> Result<bool, Error> {
         if canvas.width() != self.width as usize || canvas.height() != self.height as usize {
             return Err(Error::Invalid);
         }
         if !self.dirty {
             return Ok(false);
         }
-        canvas.clear(Rgb::new(29, 38, 59));
+        background(canvas);
         for w in &self.windows {
             if w.minimized {
                 continue;

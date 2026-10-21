@@ -107,3 +107,6 @@ mod tests {
 }
 
 pub mod display;
+pub mod shell;
+
+pub mod files;

@@ -40,6 +40,7 @@ mod input_events;
 mod input_selftest;
 mod memory;
 mod panic;
+mod power;
 mod process;
 mod programs;
 mod sched;
@@ -217,6 +218,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     degraded |= !tasks.ok();
     if tasks.ok() {
         storage::init();
+        power::init();
     }
 
     let (screen_w, screen_h) = display_size();

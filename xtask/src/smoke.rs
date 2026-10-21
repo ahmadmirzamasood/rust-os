@@ -1296,6 +1296,16 @@ fn json_string(s: &str) -> String {
     out
 }
 
+// Client scheduling may reverse creation order; both arrangements must present
+// distinct content before input is sent. Offsets match the display's cascade.
+fn colors_offset(left: Option<[u8; 3]>, overlap: Option<[u8; 3]>) -> Option<i64> {
+    match (left, overlap) {
+        (Some([70, 130, 180]), Some([180, 100, 65])) => Some(16),
+        (Some([180, 100, 65]), Some([70, 130, 180])) => Some(44),
+        _ => None,
+    }
+}
+
 /// End-to-end display checks use guest output plus pixels, never readiness alone.
 fn desktop_interact(
     vm: &mut Vm,
@@ -1310,12 +1320,10 @@ fn desktop_interact(
         Ok(image)
     };
     // Wait for full row presentation: demo readiness can precede the final row.
-    let image = loop {
+    let (image, offset) = loop {
         let image = snap(vm, "two-windows")?;
-        if image.pixel(20, 60) == Some([70, 130, 180])
-            && image.pixel(100, 100) == Some([180, 100, 65])
-        {
-            break image;
+        if let Some(offset) = colors_offset(image.pixel(20, 60), image.pixel(100, 100)) {
+            break (image, offset);
         }
         if Instant::now() > deadline {
             return Err("two independent window pixels never appeared".into());
@@ -1329,7 +1337,7 @@ fn desktop_interact(
         send_events(vm, &[button_event("left", false)])
     };
     move_pointer(vm, pin, pin)?;
-    move_pointer(vm, 20, 60)?;
+    move_pointer(vm, offset + 4, offset + 44)?;
     click(vm)?;
     let from = w.read().len();
     send_events(vm, &[key_event("a", true), key_event("a", false)])?;
@@ -1342,14 +1350,17 @@ fn desktop_interact(
         return Err("unfocused client received the focused key".into());
     }
     // Drag the now-raised Colors title, exposing its old position.
-    move_pointer(vm, 10, -40)?; // 30,20
+    move_pointer(vm, pin, pin)?;
+    move_pointer(vm, offset + 14, offset + 4)?;
     send_events(vm, &[button_event("left", true)])?;
     std::thread::sleep(Duration::from_millis(100));
-    move_pointer(vm, 400, 230)?;
+    move_pointer(vm, 430 - (offset + 14), 250 - (offset + 4))?;
     send_events(vm, &[button_event("left", false)])?;
+    // Sample an old Colors point outside the counter in either arrangement.
+    let exposed = if offset == 16 { (20, 60) } else { (270, 190) };
     let moved = loop {
         let im = snap(vm, "moved")?;
-        if im.pixel(20, 60) == Some([29, 38, 59])
+        if im.pixel(exposed.0, exposed.1) == Some([29, 38, 59])
             && im.pixel(450, 300).is_some_and(|p| p[1..] == [130, 180])
         {
             break im;
@@ -1421,6 +1432,339 @@ fn desktop_interact(
     if log.contains(markers::PANIC) || log.contains(markers::CPU_EXCEPTION) {
         return Err("kernel failure during desktop checks".into());
     }
+    Ok(())
+}
+
+/// End-to-end shell checks against a fresh designated disposable RSFS1 volume.
+pub fn shell_run(options: &crate::Options) -> Result<(), String> {
+    shell_run_inner(options, true)
+}
+
+/// Focused power acceptance; independent of multi-stage Files UI stress.
+pub fn power_run(options: &crate::Options) -> Result<(), String> {
+    shell_run_inner(options, false)
+}
+
+fn shell_run_inner(options: &crate::Options, files: bool) -> Result<(), String> {
+    let image = crate::build_image(options, crate::KernelVariant::FaultTest("shell"))?;
+    let firmware = options.firmware()?;
+    let qemu = qemu::program()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let dir = crate::workspace_root()
+        .join("target/shell-test")
+        .join(format!("{}-{stamp}", options.profile_dir()));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let disk = dir.join("DISPOSABLE-rsfs.img");
+    crate::storage_test::fresh_disk(&disk)?;
+    let vars = qemu::copy_vars(&firmware, &dir)?;
+    for boot in 1..=2 {
+        let serial = dir.join(format!("boot-{boot}.log"));
+        let mut cmd = qemu::base_command(&qemu, &firmware, vars.as_deref(), &image);
+        cmd = qemu::enable_power(cmd);
+        cmd.args(["-display", "none", "-monitor", "none", "-qmp", "stdio"]);
+        cmd.arg("-serial").arg(format!("file:{}", serial.display()));
+        cmd.args(["-device", "piix3-ide,id=databus"]);
+        cmd.arg("-drive").arg(format!(
+            "if=none,id=data,format=raw,cache=writeback,file={}",
+            disk.display()
+        ));
+        cmd.args([
+            "-device",
+            "ide-hd,drive=data,bus=databus.0,unit=0,serial=RUSTOS-DISPOSABLE",
+        ]);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let mut vm = Vm::new(cmd.spawn().map_err(|e| e.to_string())?)?;
+        // Includes Files jobs plus a full second firmware boot after restart.
+        let deadline = Instant::now() + options.timeout.unwrap_or(Duration::from_secs(600));
+        let mut watch = Watcher::new(&serial, deadline);
+        watch.wait("shell boot", Duration::from_secs(60), |log| {
+            log.contains("SHELL FRAME READY")
+        })?;
+        let log = watch.read();
+        let expected = if boot == 1 {
+            "preference=false persistent=true"
+        } else {
+            "preference=true persistent=true"
+        };
+        if !log.contains(expected) {
+            return Err(format!("preference load mismatch: {}", serial.display()));
+        }
+        let tap = |vm: &mut Vm, key: &str| -> Result<(), String> {
+            send_events(vm, &[key_event(key, true), key_event(key, false)])?;
+            std::thread::sleep(Duration::from_millis(160));
+            Ok(())
+        };
+        let snap = |vm: &mut Vm, name: &str| -> Result<RgbImage, String> {
+            std::thread::sleep(Duration::from_millis(500));
+            let im = vm.screendump(&dir.join(format!("{boot}-{name}.ppm")))?;
+            picture::save_png(&im, &dir.join(format!("{boot}-{name}.png")))?;
+            Ok(im)
+        };
+        if boot == 1 {
+            // Keyboard launcher: open all built-in applications, leave Settings focused.
+            let apps: &[usize] = if files { &[0, 1, 2, 4, 3] } else { &[3] };
+            for &app in apps {
+                tap(&mut vm, "esc")?;
+                for _ in 0..app {
+                    tap(&mut vm, "down")?;
+                }
+                let from = watch.read().len();
+                tap(&mut vm, "ret")?;
+                watch.wait("application launch", Duration::from_secs(60), |l| {
+                    l[from..].contains(&format!("SHELL LAUNCH {app}"))
+                })?;
+            }
+            let im = loop {
+                let im = snap(&mut vm, "applications")?;
+                if im.pixel(280, 250) == Some([238, 242, 246]) || Instant::now() >= deadline {
+                    break im;
+                }
+            };
+            if im.pixel(280, 250) != Some([238, 242, 246]) {
+                return Err("Settings content pixels absent".into());
+            }
+            tap(&mut vm, "ret")?;
+            watch.wait("preference synced", Duration::from_secs(60), |l| {
+                l.contains("SHELL PREFERENCE true Ok")
+            })?;
+            let im = loop {
+                let im = snap(&mut vm, "saved")?;
+                if im.pixel(1200, 400) == Some([65, 42, 52]) || Instant::now() >= deadline {
+                    break im;
+                }
+            };
+            if im.pixel(1200, 400) != Some([65, 42, 52]) {
+                return Err("accent did not change".into());
+            }
+            tap(&mut vm, "f1")?;
+            watch.wait("minimize", Duration::from_secs(10), |l| {
+                l.contains("SHELL MINIMIZE")
+            })?;
+            tap(&mut vm, "f2")?;
+            watch.wait("restore", Duration::from_secs(10), |l| {
+                l.contains("SHELL RESTORE")
+            })?;
+            tap(&mut vm, "tab")?;
+            tap(&mut vm, "f3")?;
+            watch.wait("close", Duration::from_secs(10), |l| {
+                l.contains("SHELL CLOSE")
+            })?;
+            // Mouse desktop icon launch: pin to origin and click Computer.
+            move_pointer(&mut vm, -2000, -2000)?;
+            move_pointer(&mut vm, 56, 90)?;
+            let from = watch.read().len();
+            send_events(&mut vm, &[button_event("left", true)])?;
+            std::thread::sleep(Duration::from_millis(80));
+            send_events(&mut vm, &[button_event("left", false)])?;
+            watch.wait("mouse icon launch", Duration::from_secs(10), |l| {
+                l[from..].contains("SHELL LAUNCH 0")
+            })?;
+            snap(&mut vm, "mouse")?;
+        } else {
+            let im = loop {
+                let im = snap(&mut vm, "restored")?;
+                if im.pixel(1200, 400) == Some([65, 42, 52]) || Instant::now() >= deadline {
+                    break im;
+                }
+            };
+            if im.pixel(1200, 400) != Some([65, 42, 52]) {
+                return Err("saved accent missing after reboot".into());
+            }
+        }
+        if files {
+            shell_file_checks(&mut vm, &mut watch, boot, &dir)?;
+        }
+        if watch.read().contains("SHELL FAILED") || watch.read().contains("KERNEL PANIC") {
+            return Err("shell/kernel failure".into());
+        }
+        // Real guest restart: no QMP system_reset and no host process restart.
+        // Esc may first dismiss a Files prompt/viewer; choose launcher explicitly.
+        move_pointer(&mut vm, -2000, -2000)?;
+        move_pointer(&mut vm, 40, 16)?;
+        send_events(&mut vm, &[button_event("left", true)])?;
+        std::thread::sleep(Duration::from_millis(100));
+        send_events(&mut vm, &[button_event("left", false)])?;
+        // Reset menu selection with Esc twice (close then reopen).
+        tap(&mut vm, "esc")?;
+        tap(&mut vm, "esc")?;
+        for _ in 0..6 {
+            tap(&mut vm, "down")?;
+        }
+        let confirm_from = watch.read().len();
+        tap(&mut vm, "ret")?;
+        watch.wait("power confirmation", Duration::from_secs(60), |l| {
+            l[confirm_from..].contains("SHELL POWER CONFIRM 2")
+        })?;
+        snap(&mut vm, "power-confirmation")?;
+        let cancel_from = watch.read().len();
+        tap(&mut vm, "esc")?;
+        watch.wait("power cancellation", Duration::from_secs(60), |l| {
+            l[cancel_from..].contains("SHELL POWER CANCEL")
+        })?;
+        if watch.read()[cancel_from..].contains("[rust-os] POWER CLEAN") {
+            return Err("cancelled request issued a hardware transition".into());
+        }
+        tap(&mut vm, "esc")?;
+        for _ in 0..6 {
+            tap(&mut vm, "down")?;
+        }
+        tap(&mut vm, "ret")?;
+        let from = watch.read().len();
+        tap(&mut vm, "ret")?;
+        watch.wait(
+            "guest restart and second firmware boot",
+            Duration::from_secs(60),
+            |l| {
+                l[from..].contains("[rust-os] POWER CLEAN action=2")
+                    && l[from..].contains("SHELL FRAME READY")
+                    && l[from..].contains("preference=true persistent=true")
+            },
+        )?;
+        tap(&mut vm, "esc")?;
+        for _ in 0..5 {
+            tap(&mut vm, "down")?;
+        }
+        tap(&mut vm, "ret")?;
+        let from = watch.read().len();
+        tap(&mut vm, "ret")?;
+        let end = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = vm.child.try_wait().map_err(|e| e.to_string())? {
+                if !status.success()
+                    || !watch.read()[from..].contains("[rust-os] POWER CLEAN action=1")
+                {
+                    return Err("guest clean shutdown failed".into());
+                }
+                break;
+            }
+            if Instant::now() >= end {
+                return Err("guest shutdown did not terminate QEMU".into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if files {
+            crate::storage_test::verify_shell_files(&disk, boot)?;
+        }
+        crate::storage_test::verify_shell_preferences(&disk)?;
+        eprintln!(
+            "shell boot {boot}: PASS (independent remount, preference bytes; Files checks={files})"
+        );
+    }
+    eprintln!(
+        "shell/power checks PASS (Files UI checks={}): cancel, guest restart, clean shutdown, preferences and independent remount; evidence {}",
+        files,
+        dir.display()
+    );
+    Ok(())
+}
+
+// Exercise real shell controls, then verify exact persisted bytes independently.
+fn shell_file_checks(
+    vm: &mut Vm,
+    watch: &mut Watcher,
+    boot: usize,
+    dir: &Path,
+) -> Result<(), String> {
+    fn tap(vm: &mut Vm, key: &str) -> Result<(), String> {
+        send_events(vm, &[key_event(key, true), key_event(key, false)])?;
+        std::thread::sleep(Duration::from_millis(140));
+        Ok(())
+    }
+    fn text(vm: &mut Vm, value: &str) -> Result<(), String> {
+        for c in value.chars() {
+            tap(vm, &c.to_string())?;
+        }
+        tap(vm, "ret")
+    }
+    fn open(vm: &mut Vm, watch: &mut Watcher, app: usize) -> Result<(), String> {
+        let from = watch.read().len();
+        tap(vm, "esc")?;
+        for _ in 0..app {
+            tap(vm, "down")?;
+        }
+        tap(vm, "ret")?;
+        watch
+            .wait("Files view launch", Duration::from_secs(10), |l| {
+                l[from..].contains(&format!("SHELL LAUNCH {app}"))
+            })
+            .map(drop)
+    }
+    fn finish(vm: &mut Vm, watch: &mut Watcher, app: usize, from: usize) -> Result<(), String> {
+        watch.wait("Files operation", Duration::from_secs(120), |l| {
+            l[from..].contains(&format!("FILES {app} Complete"))
+                || l[from..].contains("partial work kept")
+        })?;
+        if watch.read()[from..].contains("partial work kept") {
+            return Err("Files operation failed; see serial log".into());
+        }
+        // Redraw after completion before sending another key.
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = vm;
+        Ok(())
+    }
+    if boot == 1 {
+        open(vm, watch, 1)?;
+        tap(vm, "n")?;
+        let from = watch.read().len();
+        text(vm, "docs")?;
+        finish(vm, watch, 0, from)?;
+        tap(vm, "ret")?; // docs is the first (directory) row.
+        tap(vm, "t")?;
+        let from = watch.read().len();
+        text(vm, "alpha")?;
+        finish(vm, watch, 0, from)?;
+        tap(vm, "r")?;
+        let from = watch.read().len();
+        text(vm, "beta")?;
+        finish(vm, watch, 0, from)?;
+        tap(vm, "ret")?;
+        tap(vm, "backspace")?; // read-only text viewer.
+        tap(vm, "c")?;
+        tap(vm, "backspace")?;
+        let from = watch.read().len();
+        tap(vm, "v")?;
+        finish(vm, watch, 0, from)?;
+        tap(vm, "down")?; // root: docs, beta, desktop.pref.
+        let from = watch.read().len();
+        tap(vm, "delete")?;
+        finish(vm, watch, 0, from)?;
+        open(vm, watch, 2)?;
+    } else {
+        open(vm, watch, 2)?;
+        let from = watch.read().len();
+        tap(vm, "u")?;
+        finish(vm, watch, 1, from)?;
+        open(vm, watch, 1)?;
+        tap(vm, "down")?;
+        // Explicit confirmation, including a cancellation that must not delete.
+        tap(vm, "d")?;
+        tap(vm, "esc")?;
+        let from = watch.read().len();
+        tap(vm, "delete")?;
+        finish(vm, watch, 0, from)?;
+        open(vm, watch, 2)?;
+        tap(vm, "d")?;
+        let from = watch.read().len();
+        text(vm, "delete")?;
+        finish(vm, watch, 1, from)?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let im = loop {
+        std::thread::sleep(Duration::from_millis(500));
+        let im = vm.screendump(&dir.join(format!("{boot}-files.ppm")))?;
+        if im.pixel(400, 180) == Some([60, 100, 150]) {
+            break im;
+        }
+        if Instant::now() >= deadline {
+            return Err("Trash focused pixels absent".into());
+        }
+    };
+    picture::save_png(&im, &dir.join(format!("{boot}-files.png")))?;
     Ok(())
 }
 
@@ -1598,6 +1942,18 @@ mod tests {
             Scenario::NoDisplay.judge(&format!("{ENTERED}{}\n", markers::BOOT_OK)),
             Verdict::Fail(_)
         ));
+    }
+
+    #[test]
+    fn detects_both_demo_creation_orders() {
+        let colors = Some([70, 130, 180]);
+        let counter = Some([180, 100, 65]);
+        assert_eq!(colors_offset(colors, counter), Some(16));
+        assert_eq!(colors_offset(counter, colors), Some(44));
+        assert_eq!(colors_offset(colors, colors), None);
+        assert_eq!(colors_offset(counter, counter), None);
+        assert_eq!(colors_offset(None, colors), None);
+        assert_eq!(colors_offset(counter, None), None);
     }
 
     #[test]

@@ -41,6 +41,7 @@
 pub mod display;
 pub mod files;
 pub mod loader;
+pub mod power;
 
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -407,7 +408,9 @@ fn start(
             refs: u32::from(parent.is_some()),
             started_ns: time::uptime_ns(),
             test_driver,
-            display_service: cfg!(feature = "desktop") && parent.is_none() && name == b"display",
+            display_service: cfg!(feature = "desktop")
+                && parent.is_none()
+                && (name == b"display" || (cfg!(feature = "shell") && name == b"shell")),
         };
         let mut child_handle = 0;
         let mut parent_handle = 0;
@@ -450,7 +453,17 @@ pub fn start_init(name: &str) -> Result<u32, StartError> {
 
 /// Start the bundled display as a boot service, without process-test reporting.
 pub fn start_display() -> Result<u32, StartError> {
-    start(b"display", None, 0, false).map(|(pid, _)| pid)
+    start(
+        if cfg!(feature = "shell") {
+            b"shell"
+        } else {
+            b"display"
+        },
+        None,
+        0,
+        false,
+    )
+    .map(|(pid, _)| pid)
 }
 
 // --- Ending ----------------------------------------------------------------

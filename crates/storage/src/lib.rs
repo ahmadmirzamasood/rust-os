@@ -27,6 +27,7 @@ pub enum Error {
     Corrupt,
     ReadOnly,
     NoMemory,
+    Busy,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -332,6 +333,7 @@ pub struct DiskFs<D> {
     fs: RamFs,
     device: D,
     failed: bool,
+    syncing: Option<usize>,
 }
 
 impl<D: BlockDevice> Vfs for DiskFs<D> {
@@ -433,11 +435,14 @@ impl<D: BlockDevice> DiskFs<D> {
             fs,
             device,
             failed: false,
+            syncing: None,
         })
     }
     pub fn writable(&self) -> Result<()> {
         if self.failed {
             Err(Error::ReadOnly)
+        } else if self.syncing.is_some() {
+            Err(Error::Busy)
         } else {
             Ok(())
         }
@@ -445,37 +450,71 @@ impl<D: BlockDevice> DiskFs<D> {
     /// Whole-volume writeback. On error the mount is poisoned read-only;
     /// reboot/remount is required. There is no atomic commit or recovery.
     pub fn sync(&mut self) -> Result<()> {
-        self.writable()?;
-        let result = self.save();
-        if result.is_err() {
-            self.failed = true;
+        while !self.sync_step()? {}
+        Ok(())
+    }
+    /// Writes at most one sector or issues one flush. Mutations are rejected
+    /// with Busy until complete; reads remain available. Any caller can resume
+    /// an interrupted sync. The caller must keep polling until true or error.
+    pub fn sync_step(&mut self) -> Result<bool> {
+        if self.failed {
+            return Err(Error::ReadOnly);
+        }
+        let mut step = self.syncing.unwrap_or(0);
+        // Unoccupied/empty extents have no logical bytes. Skip their no-op
+        // slots within this call, still issuing at most one device transfer.
+        if step < NODES * 9
+            && step % 9 < 8
+            && self
+                .fs
+                .nodes
+                .get(step / 9)
+                .is_none_or(|n| n.data.is_empty())
+        {
+            step = step / 9 * 9 + 8;
+        }
+        self.syncing = Some(step);
+        let result = self.save_step(step);
+        match result {
+            Ok(true) => self.syncing = None,
+            Ok(false) => self.syncing = Some(step + 1),
+            Err(_) => {
+                self.failed = true;
+                self.syncing = None;
+            }
         }
         result
     }
-    fn save(&mut self) -> Result<()> {
-        for i in 0..NODES {
-            let mut meta = [0; SECTOR];
-            if let Some(n) = self.fs.nodes.get(i) {
-                for j in 0..8 {
-                    let mut b = [0; SECTOR];
-                    let start = j * SECTOR;
-                    if start < n.data.len() {
-                        let len = SECTOR.min(n.data.len() - start);
-                        b[..len].copy_from_slice(&n.data[start..start + len]);
-                    }
-                    self.device
-                        .write(1 + NODES as u64 + (i * 8 + j) as u64, &b)?;
-                }
-                meta[0] = if n.kind == Kind::File { 1 } else { 2 };
-                meta[1] = n.path.len() as u8;
-                meta[4..8].copy_from_slice(&(n.data.len() as u32).to_le_bytes());
-                meta[8..12].copy_from_slice(&hash(&n.data).to_le_bytes());
-                meta[12..12 + n.path.len()].copy_from_slice(n.path.as_bytes());
-                seal(&mut meta);
-            }
-            self.device.write(1 + i as u64, &meta)?;
+    fn save_step(&mut self, step: usize) -> Result<bool> {
+        if step == NODES * 9 {
+            self.device.flush()?;
+            return Ok(true);
         }
-        self.device.flush()
+        let i = step / 9;
+        let j = step % 9;
+        let mut bytes = [0; SECTOR];
+        if j < 8 {
+            if let Some(n) = self.fs.nodes.get(i) {
+                let start = j * SECTOR;
+                if start < n.data.len() {
+                    let len = SECTOR.min(n.data.len() - start);
+                    bytes[..len].copy_from_slice(&n.data[start..start + len]);
+                }
+                self.device
+                    .write(1 + NODES as u64 + (i * 8 + j) as u64, &bytes)?;
+            }
+        } else {
+            if let Some(n) = self.fs.nodes.get(i) {
+                bytes[0] = if n.kind == Kind::File { 1 } else { 2 };
+                bytes[1] = n.path.len() as u8;
+                bytes[4..8].copy_from_slice(&(n.data.len() as u32).to_le_bytes());
+                bytes[8..12].copy_from_slice(&hash(&n.data).to_le_bytes());
+                bytes[12..12 + n.path.len()].copy_from_slice(n.path.as_bytes());
+                seal(&mut bytes);
+            }
+            self.device.write(1 + i as u64, &bytes)?;
+        }
+        Ok(false)
     }
     pub fn into_device(self) -> D {
         self.device

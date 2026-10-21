@@ -172,6 +172,7 @@ refuses to run on a kernel with another version.
 | 11 | `CHANNEL_RECV` | handle, ptr, capacity, flags (`1` = don't wait) → length; blocks while empty |
 | 12–20 | File and volume calls | Open/read/write, list, mkdir, rename, remove, sync and volume kind; see [FILESYSTEM.md](../FILESYSTEM.md) |
 | 21 | `FS_TEST_SHUTDOWN` | Init-only, designated disposable disk only: sync and Q35 S5 test power-off |
+| 25 | `FS_SYNC_STEP` | One writeback sector or flush; 0=pending, 1=complete; mutations return WouldBlock until finished |
 
 Errors: `UnknownSyscall`, `InvalidArgument`, `BadAddress`, `BadHandle`,
 `WrongType`, `TooLarge`, `NoResources`, `NotFound`, `WouldBlock`,
@@ -212,7 +213,7 @@ before.
 
 `init` checks: five IPC round trips with `echo` and its clean exit;
 `PeerClosed` after the peer exits; three CPU-bound `spin` processes that
-never yield all run overlapping in time (impossible without preemption);
+never yield all run overlapping in time. READY/GO coordinates loading, then the parent receives all START messages before sending STOP; workers do not block during that interval. A ten-second worker deadline and the VM timeout bound failures;
 each `fault` mode ends with the expected vector; and `abuse` (78 checks)
 sees every invalid call fail with the documented error: unknown numbers;
 null, kernel, non-canonical, overflowing, unmapped, read-only and
@@ -241,7 +242,7 @@ Storage smoke adds a second boot after clean shutdown; see
 - Sends never block (`WouldBlock` on a full inbox).
 - `int 0x80` rather than `syscall`/`sysret`: simpler and sharing the
   interrupt path, slower. The GDT order already allows `sysret` later.
-- Kernel stacks are reclaimed, but their address space is never reused
-  (a few page-table frames stay allocated).
-- Programs come only from the boot bundle; there is no file system.
+- Kernel stacks and their bounded virtual reservations are reclaimed
+  (a bounded set of shared page-table frames stays allocated).
+- Programs come only from the boot bundle; filesystem executable loading is unsupported.
 - Verified only in QEMU (q35, OVMF), default CPU model and `-cpu max`.

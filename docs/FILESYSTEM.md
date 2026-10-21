@@ -5,7 +5,7 @@ filesystem and **RSFS1**, a project-owned experimental disk format. The code
 is MIT-licensed and adds no third-party guest dependencies. RSFS1 was chosen
 for a small, auditable first slice; it is not FAT, ext, POSIX or an
 interchange format. The UEFI boot image's FAT partition is not mounted by
-this driver. There is no file manager or Trash implementation yet.
+this driver. The ring-3 shell provides [Files and Trash](files.md).
 
 ## Supported devices and volumes
 
@@ -84,7 +84,9 @@ handle, not the application's ability to open a writable handle. Neither
 paths nor syscalls expose raw block devices. This is not a sandbox for
 untrusted applications. Filesystem access is serialized by a kernel lock
 that disables preemption; IRQ handlers never access storage. Long PIO or
-full-volume sync operations can delay other processes.
+synchronous full-volume sync operations can delay other processes. Files uses
+FS_SYNC_STEP to release the lock between single-sector transfers/flush. While
+stepped writeback is pending, mutations return WouldBlock; reads remain available.
 
 ## RSFS1 disk format
 
