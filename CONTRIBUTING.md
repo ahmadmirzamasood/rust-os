@@ -3,7 +3,7 @@
 The project is at an early stage: the kernel boots in QEMU, self-tests
 memory management, interrupts and its scheduler, runs its own test programs
 as isolated user processes and shows a welcome screen with an input panel;
-nothing is usable yet. Focused, well-tested
+the bounded Files/Trash desktop is experimental. Focused, well-tested
 changes are welcome. Open an issue first for anything larger than a small fix.
 
 ## Before you start

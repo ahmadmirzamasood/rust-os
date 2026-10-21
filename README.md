@@ -120,3 +120,6 @@ controls, limits, validation commands and the kernel/device boundary.
 
 See [desktop controls and limits](docs/desktop.md) for the shell, built-in
 applications, saved preferences and reboot test.
+
+Release preparation: [candidate, commands and publication checklist](docs/release.md).
+Security boundaries: [threat model](docs/security-model.md).

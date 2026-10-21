@@ -1296,6 +1296,16 @@ fn json_string(s: &str) -> String {
     out
 }
 
+// Client scheduling may reverse creation order; both arrangements must present
+// distinct content before input is sent. Offsets match the display's cascade.
+fn colors_offset(left: Option<[u8; 3]>, overlap: Option<[u8; 3]>) -> Option<i64> {
+    match (left, overlap) {
+        (Some([70, 130, 180]), Some([180, 100, 65])) => Some(16),
+        (Some([180, 100, 65]), Some([70, 130, 180])) => Some(44),
+        _ => None,
+    }
+}
+
 /// End-to-end display checks use guest output plus pixels, never readiness alone.
 fn desktop_interact(
     vm: &mut Vm,
@@ -1310,12 +1320,10 @@ fn desktop_interact(
         Ok(image)
     };
     // Wait for full row presentation: demo readiness can precede the final row.
-    let image = loop {
+    let (image, offset) = loop {
         let image = snap(vm, "two-windows")?;
-        if image.pixel(20, 60) == Some([70, 130, 180])
-            && image.pixel(100, 100) == Some([180, 100, 65])
-        {
-            break image;
+        if let Some(offset) = colors_offset(image.pixel(20, 60), image.pixel(100, 100)) {
+            break (image, offset);
         }
         if Instant::now() > deadline {
             return Err("two independent window pixels never appeared".into());
@@ -1329,7 +1337,7 @@ fn desktop_interact(
         send_events(vm, &[button_event("left", false)])
     };
     move_pointer(vm, pin, pin)?;
-    move_pointer(vm, 20, 60)?;
+    move_pointer(vm, offset + 4, offset + 44)?;
     click(vm)?;
     let from = w.read().len();
     send_events(vm, &[key_event("a", true), key_event("a", false)])?;
@@ -1342,14 +1350,17 @@ fn desktop_interact(
         return Err("unfocused client received the focused key".into());
     }
     // Drag the now-raised Colors title, exposing its old position.
-    move_pointer(vm, 10, -40)?; // 30,20
+    move_pointer(vm, pin, pin)?;
+    move_pointer(vm, offset + 14, offset + 4)?;
     send_events(vm, &[button_event("left", true)])?;
     std::thread::sleep(Duration::from_millis(100));
-    move_pointer(vm, 400, 230)?;
+    move_pointer(vm, 430 - (offset + 14), 250 - (offset + 4))?;
     send_events(vm, &[button_event("left", false)])?;
+    // Sample an old Colors point outside the counter in either arrangement.
+    let exposed = if offset == 16 { (20, 60) } else { (270, 190) };
     let moved = loop {
         let im = snap(vm, "moved")?;
-        if im.pixel(20, 60) == Some([29, 38, 59])
+        if im.pixel(exposed.0, exposed.1) == Some([29, 38, 59])
             && im.pixel(450, 300).is_some_and(|p| p[1..] == [130, 180])
         {
             break im;
@@ -1931,6 +1942,18 @@ mod tests {
             Scenario::NoDisplay.judge(&format!("{ENTERED}{}\n", markers::BOOT_OK)),
             Verdict::Fail(_)
         ));
+    }
+
+    #[test]
+    fn detects_both_demo_creation_orders() {
+        let colors = Some([70, 130, 180]);
+        let counter = Some([180, 100, 65]);
+        assert_eq!(colors_offset(colors, counter), Some(16));
+        assert_eq!(colors_offset(counter, colors), Some(44));
+        assert_eq!(colors_offset(colors, colors), None);
+        assert_eq!(colors_offset(counter, counter), None);
+        assert_eq!(colors_offset(None, colors), None);
+        assert_eq!(colors_offset(counter, None), None);
     }
 
     #[test]

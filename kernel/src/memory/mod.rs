@@ -162,7 +162,7 @@ struct Manager {
     root: PhysFrame,
     frames: FrameBitmap<&'static mut [u64]>,
     slot_base: u64,
-    next_stack: u64,
+    stack_slots: u64,
     next_scratch: u64,
 }
 
@@ -404,7 +404,7 @@ pub fn init(boot: &BootMemory<'_>) -> Result<InitReport, InitError> {
             root,
             frames,
             slot_base,
-            next_stack: slot_base + STACKS_OFFSET,
+            stack_slots: 0,
             next_scratch: slot_base + SCRATCH_OFFSET,
         });
     }
@@ -550,16 +550,21 @@ pub fn page(addr: u64) -> Option<Page> {
 }
 
 /// Allocate a kernel stack of `pages` mapped pages with an unmapped guard
-/// page below it. Stack address space is never reused, so the page above a
-/// stack is the next stack's guard (or unmapped).
+/// page below it. Sixty-four reusable nine-page reservations bound page-table
+/// retention even under indefinite thread churn. Each supports 1..=8 pages;
+/// the next reservation's guard remains unmapped. This exceeds the scheduler's
+/// 32-thread limit plus the permanent double-fault stack.
 pub fn allocate_stack(pages: u64, guard_label: &'static str) -> Result<KernelStack, MemError> {
+    if !(1..=8).contains(&pages) {
+        return Err(MemError::AddressSpaceFull);
+    }
     let guard = with_manager(|m| {
-        let guard = m.next_stack;
-        let end = guard
-            .checked_add((pages + 1) * PAGE_SIZE)
-            .filter(|&e| e <= m.slot_base + SCRATCH_OFFSET)
-            .ok_or(MemError::AddressSpaceFull)?;
-        m.next_stack = end;
+        let slot = m.stack_slots.trailing_ones();
+        if slot == 64 {
+            return Err(MemError::AddressSpaceFull);
+        }
+        let guard = m.slot_base + STACKS_OFFSET + u64::from(slot) * 9 * PAGE_SIZE;
+        m.stack_slots |= 1u64 << slot;
         Ok(guard)
     })??;
     let stack = KernelStack {
@@ -572,9 +577,10 @@ pub fn allocate_stack(pages: u64, guard_label: &'static str) -> Result<KernelSta
         if let Err(err) = map_new(page, Flags::DATA) {
             for j in 0..i {
                 if let Some(p) = self::page(stack.bottom + j * PAGE_SIZE) {
-                    let _ = unmap_and_free(p);
+                    unmap_and_free(p)?;
                 }
             }
+            release_stack_slot(stack.guard)?;
             return Err(err);
         }
     }
@@ -587,7 +593,8 @@ pub fn allocate_stack(pages: u64, guard_label: &'static str) -> Result<KernelSta
 /// # Safety
 ///
 /// Nothing may use the stack any more (no CPU table points to it, no code
-/// runs on it, no references into it exist).
+/// runs on it, no references into it exist). It must be an unchanged value
+/// returned by allocate_stack, and must be freed exactly once.
 pub unsafe fn free_stack(stack: KernelStack) -> Result<(), MemError> {
     unregister_guard(stack.guard);
     let mut addr = stack.bottom;
@@ -595,7 +602,22 @@ pub unsafe fn free_stack(stack: KernelStack) -> Result<(), MemError> {
         unmap_and_free(page(addr).ok_or(MemError::NotOwned)?)?;
         addr += PAGE_SIZE;
     }
-    Ok(())
+    release_stack_slot(stack.guard)
+}
+
+/// Called only after all stack leaves have been unmapped and invalidated.
+/// Retained intermediate tables stay shared with existing process roots.
+fn release_stack_slot(guard: u64) -> Result<(), MemError> {
+    with_manager(|m| {
+        let offset = guard
+            .checked_sub(m.slot_base + STACKS_OFFSET)
+            .ok_or(MemError::NotOwned)?;
+        if offset % (9 * PAGE_SIZE) != 0 || offset / (9 * PAGE_SIZE) >= 64 {
+            return Err(MemError::NotOwned);
+        }
+        m.stack_slots &= !(1u64 << (offset / (9 * PAGE_SIZE)));
+        Ok(())
+    })?
 }
 
 /// Result of [`audit_reservations`].

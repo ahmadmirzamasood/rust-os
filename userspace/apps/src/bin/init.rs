@@ -304,11 +304,25 @@ fn preemption(t: &mut Tally) {
     let mut ends = [0u64; SPINNERS];
     let mut iterations = [0u64; SPINNERS];
     let mut protocol_ok = true;
+    // Every child is loaded and waiting before any measured spin begins.
+    // Fixed time-from-spawn windows fail under slow image loading/host stalls.
+    for (channel, _) in spinners.iter().flatten() {
+        protocol_ok &= matches!(receive3(channel), Some((0, 0, 0)));
+    }
+    for (channel, _) in spinners.iter().flatten() {
+        protocol_ok &= channel.send(b"go").is_ok();
+    }
     for (i, (channel, _)) in spinners.iter().flatten().enumerate() {
         match receive3(channel) {
             Some((SPIN_START, start, _)) => starts[i] = start,
             _ => protocol_ok = false,
         }
+    }
+    // Workers do not yield or block between START and DONE. Receiving all
+    // START messages while they keep computing therefore requires preemption.
+    ulib::sleep_ms(300);
+    for (channel, _) in spinners.iter().flatten() {
+        protocol_ok &= channel.send(b"stop").is_ok();
     }
     for (i, (channel, _)) in spinners.iter().flatten().enumerate() {
         match receive3(channel) {
