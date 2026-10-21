@@ -10,7 +10,7 @@ anything else is marked.
 | --- | --- | --- |
 | `rustup` | Installs the pinned toolchain from `rust-toolchain.toml` | Toolchain: `nightly-2026-10-08` with `rustfmt`, `clippy`, `rust-src`, `llvm-tools-preview`, target `x86_64-unknown-none` |
 | A host linker | Builds `xtask` and `image-builder` | Linux/macOS: the system C toolchain. Windows: MSVC Build Tools, **or** the `x86_64-pc-windows-gnullvm` host with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) on `PATH` (`rustup set default-host x86_64-pc-windows-gnullvm`) |
-| Network access, first `image` build only | `bootloader`'s build script runs `cargo install bootloader-x86_64-uefi` from crates.io | Cached afterwards in `target/` |
+| Network access, first `image` build and release-source fetch | `bootloader`'s build script runs `cargo install bootloader-x86_64-uefi` from crates.io | Cached afterwards in `target/` |
 | QEMU (`qemu-system-x86_64`) | `cargo xtask run`, `cargo xtask smoke` | Not needed for build or tests. Found on `PATH`, via `RUST_OS_QEMU`, or at `C:\Program Files\qemu` on Windows (`winget install SoftwareFreedomConservancy.QEMU`) |
 | OVMF UEFI firmware | `cargo xtask run`, `cargo xtask smoke` | Linux: your distribution's `ovmf`/`edk2-ovmf` package. Windows QEMU builds bundle it as `share\edk2-x86_64-code.fd` + `share\edk2-i386-vars.fd`. Common install locations are detected automatically |
 
@@ -217,3 +217,10 @@ verification after clean exit. `cargo xtask vm-images --release` produces shell
 raw/VDI/VMDK candidates; see [power/VM configurations and limits](power.md).
 `cargo xtask power-smoke [--release]` focuses on cancellation, actual guest reset,
 S5 exit and exact persisted preference bytes, without the Files navigation stress.
+
+## Release validation tools
+
+`cargo xtask robustness` runs deterministic host parser mutations and persistent
+filesystem lifecycle stress. `cargo xtask stress --release` runs five bounded
+process/input VM cycles with separate evidence. `cargo xtask release --release`
+stages a versioned review bundle without publishing. See [release instructions](release.md).

@@ -11,7 +11,7 @@
 //!   ping-pong with `yield_now`.
 //! - **Cleanup:** after the idle thread reaps them, the thread count
 //!   returns to its starting value and every stack frame is free again
-//!   (up to a few page-table frames: stack address space is never reused).
+//!   (up to a few page-table frames when the bounded stack pool first grows).
 //!
 //! Prints one marker line that `cargo xtask smoke` checks.
 
@@ -184,7 +184,7 @@ pub fn run() -> Outcome {
     for _ in 0..50 {
         sleep_ms(2);
         let now = counters();
-        // Stacks never reuse address space, so a new page table may remain.
+        // First use of a pool slot may retain a page table; churn reuses it.
         let leaked = frames_before.saturating_sub(memory::free_frames());
         if now.threads == before.threads && leaked <= MAX_TABLE_FRAMES {
             cleaned = true;

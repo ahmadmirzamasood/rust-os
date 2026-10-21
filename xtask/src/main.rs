@@ -2,6 +2,8 @@
 
 mod picture;
 mod qemu;
+mod release;
+mod robustness;
 mod smoke;
 mod storage_test;
 mod user;
@@ -31,6 +33,7 @@ const PRIVATE_PREFIXES: &[&str] = &[
     ".agent-private/",
     "GETTING_STARTED_PRIVATE.md",
     "docs/prompts/",
+    "docs/PROMPTS.md",
     "docs/phases/",
     "docs/project/",
     "docs/subsystems/",
@@ -39,6 +42,13 @@ const PRIVATE_PREFIXES: &[&str] = &[
     "private/",
     ".claude/",
     ".codex/",
+    "AGENTS.local.md",
+    "CLAUDE.local.md",
+    "MEMORY.md",
+    "QUERY.md",
+    "QUERIES.md",
+    "PROMPTS.md",
+    "rust-os-implementation-pack.zip",
 ];
 
 const HELP: &str = "\
@@ -56,6 +66,9 @@ commands:
   shell-smoke     disposable disk: shell navigation and reboot preferences
   power-smoke     focused desktop cancel/restart/shutdown and saved-byte checks
   vm-images       shell raw/VDI/VMDK images; conversion is not VM validation
+  robustness      deterministic parser mutation and filesystem lifecycle stress
+  stress          five bounded process/input VM cycles with separate evidence
+  release         stage versioned shell image, public source, licenses and hashes
   run             boot the graphical desktop in QEMU
   diagnostics     boot the original diagnostic UI and process tests
   smoke           boot smoke test in headless QEMU: serial markers + screenshot check
@@ -98,6 +111,9 @@ fn main() -> ExitCode {
         "user" => user::build_bundle(&options).map(drop),
         "image" => build_image(&options, KernelVariant::Normal).map(drop),
         "vm-images" => vm_images::run(&options),
+        "robustness" => robustness::run(),
+        "stress" => stress(&options),
+        "release" => release::run(&options),
         "run" => run(&options, KernelVariant::FaultTest("shell")),
         "diagnostics" => run(&options, KernelVariant::Normal),
         "desktop" => run(&options, KernelVariant::FaultTest("shell")),
@@ -370,6 +386,34 @@ fn run(options: &Options, variant: KernelVariant) -> Result<(), String> {
     }
 }
 
+fn stress(options: &Options) -> Result<(), String> {
+    let image = build_image(options, KernelVariant::Normal)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    for round in 0..5 {
+        let setup = smoke::Setup {
+            qemu: qemu::program()?,
+            firmware: options.firmware()?,
+            timeout: options.timeout.unwrap_or(SMOKE_TIMEOUT),
+            out_root: workspace_root()
+                .join("target/stress")
+                .join(format!("{}-{stamp}/{round}", options.profile_dir())),
+        };
+        for scenario in [Scenario::Processes, Scenario::Input] {
+            eprintln!(
+                "stress round {round}: {}",
+                smoke::run(scenario, &image, &setup)?
+            );
+        }
+    }
+    eprintln!(
+        "stress PASS: five process/input cycles; each boot includes memory and scheduler self-tests"
+    );
+    Ok(())
+}
+
 fn smoke(options: &Options) -> Result<(), String> {
     let scenarios = Scenario::parse(options.scenario.as_deref().unwrap_or("all"))?;
     let setup = smoke::Setup {
@@ -492,6 +536,9 @@ mod tests {
         assert!(is_private(".Agent-Private/x"));
         assert!(is_private("GETTING_STARTED_PRIVATE.md"));
         assert!(is_private("docs/prompts/00.md"));
+        assert!(is_private("docs/PROMPTS.md"));
+        assert!(is_private("docs/Prompts/request.md"));
+        assert!(is_private("AGENTS.local.md"));
     }
 
     #[test]

@@ -7,8 +7,8 @@ spaces; the kernel validates every system-call argument and user pointer and
 terminates a faulting process without affecting others (see
 [docs/architecture/processes.md](docs/architecture/processes.md)). This has
 been tested only with the project's own programs in QEMU. There are no
-per-process resource quotas beyond fixed table sizes, no security review
-and no fuzzing of the kernel interface, so it must not be described as safe
+per-process resource quotas beyond fixed table sizes or coverage-guided
+fuzzing of the kernel interface, so it must not be described as safe
 for untrusted programs. The shell and built-in views share a trusted ring-3 process. Use disposable VM disk images only.
 
 Contributions must validate external data (boot information, disk metadata,
@@ -34,7 +34,7 @@ process to copy RGB scanlines and dequeue input. Window policy, surface buffers
 and composition run in ring 3. Channels establish client identities; no client
 shared-memory mappings exist. This remains a bounded prototype for bundled
 programs, with possible lost client input under channel backpressure and no
-service restart or adversarial security review. See
+service restart. See [review scope and threat model](docs/security-model.md) and
 [display boundary](docs/architecture/display.md).
 
 The graphical shell uses the same bounded display boot role as the display demo.
