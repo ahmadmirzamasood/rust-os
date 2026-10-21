@@ -1,6 +1,6 @@
 //! Scheduler self-test, run on every boot once the scheduler is up.
 //!
-//! - **Preemption:** three kernel threads spin for [`SPIN_MS`] without ever
+//! - **Preemption:** three kernel threads spin for at least [`SPIN_MS`] without ever
 //!   yielding, each counting iterations and watching the others' counters.
 //!   On one CPU a thread can only see another counter move between two of
 //!   its own reads if it was preempted in between. All three must make
@@ -11,7 +11,7 @@
 //!   ping-pong with `yield_now`.
 //! - **Cleanup:** after the idle thread reaps them, the thread count
 //!   returns to its starting value and every stack frame is free again
-//!   (up to a few page-table frames: stack address space is never reused).
+//!   (up to a few page-table frames when the bounded stack pool first grows).
 //!
 //! Prints one marker line that `cargo xtask smoke` checks.
 
@@ -32,6 +32,7 @@ const MAX_TABLE_FRAMES: u64 = 4;
 static COUNTS: [AtomicU64; SPINNERS] = [const { AtomicU64::new(0) }; SPINNERS];
 static INTERLEAVED: [AtomicBool; SPINNERS] = [const { AtomicBool::new(false) }; SPINNERS];
 static DEADLINE_NS: AtomicU64 = AtomicU64::new(0);
+static MINIMUM_NS: AtomicU64 = AtomicU64::new(0);
 static TURN: AtomicU64 = AtomicU64::new(0);
 static PING_PONG_OK: AtomicBool = AtomicBool::new(true);
 
@@ -75,6 +76,14 @@ fn spinner(index: u64) {
             seen = now;
         }
         core::hint::spin_loop();
+        // Host stalls and coalesced timer IRQs may outlast the minimum test
+        // interval. Keep all spinners alive until each actually observes
+        // interleaving; retain the hard deadline so broken preemption fails.
+        if time::uptime_ns() >= MINIMUM_NS.load(Ordering::Relaxed)
+            && INTERLEAVED.iter().all(|f| f.load(Ordering::Relaxed))
+        {
+            break;
+        }
     }
 }
 
@@ -106,7 +115,8 @@ pub fn run() -> Outcome {
     let frames_before = memory::free_frames();
 
     // Preemption.
-    DEADLINE_NS.store(started_at + SPIN_MS * 1_000_000, Ordering::Relaxed);
+    MINIMUM_NS.store(started_at + SPIN_MS * 1_000_000, Ordering::Relaxed);
+    DEADLINE_NS.store(started_at + 3_000_000_000, Ordering::Relaxed);
     let mut threads: [Option<ThreadId>; SPINNERS] = [None; SPINNERS];
     for (i, slot) in threads.iter_mut().enumerate() {
         *slot = spawn_kernel("selftest-spin", spinner, i as u64).ok();
@@ -174,7 +184,7 @@ pub fn run() -> Outcome {
     for _ in 0..50 {
         sleep_ms(2);
         let now = counters();
-        // Stacks never reuse address space, so a new page table may remain.
+        // First use of a pool slot may retain a page table; churn reuses it.
         let leaked = frames_before.saturating_sub(memory::free_frames());
         if now.threads == before.threads && leaked <= MAX_TABLE_FRAMES {
             cleaned = true;

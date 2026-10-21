@@ -33,5 +33,10 @@ fn main() -> i32 {
     if ulib::fs::test_shutdown() != Err(Error::PermissionDenied) {
         return 4;
     }
+    for action in 0..=3 {
+        if ulib::display::power(action) != Err(Error::PermissionDenied) {
+            return 5;
+        }
+    }
     0
 }

@@ -23,7 +23,7 @@ bootloader stage, which `bootloader` 0.11.17 compiles from the crate
 | `ryu` 1.0 | Apache-2.0 OR BSL-1.0 | |
 | `unicode-ident` 1.0 | (MIT OR Apache-2.0) AND Unicode-DFS-2016 | Build-time (proc-macro) dependency |
 | `byteorder` 1.4 | Unlicense OR MIT | |
-| Remaining crates in the UEFI stage lockfile (`log`, `spin`, `spinning_top`, `conquer-once`, `rand`, `rand_core`, `rand_hc`, `serde`, `serde-json-core`, `heapless`, `hash32`, `volatile`, `xmas-elf`, `uart_16550`, `ptr_meta`, `zero`, `bit_field`, `bitflags`, `lock_api`, `scopeguard`, ...) | MIT and/or Apache-2.0 | Some are build-time only; `atomic-polyfill` and `critical-section` licenses not yet confirmed |
+| Remaining crates in the UEFI stage lockfile (`log`, `spin`, `spinning_top`, `conquer-once`, `rand`, `rand_core`, `rand_hc`, `serde`, `serde-json-core`, `heapless`, `hash32`, `volatile`, `xmas-elf`, `uart_16550`, `ptr_meta`, `zero`, `bit_field`, `bitflags`, `lock_api`, `scopeguard`, ...) | MIT and/or Apache-2.0 | Some are build-time only; `atomic-polyfill` 1.0.3 and `critical-section` 1.2.0 confirmed MIT OR Apache-2.0 from exact cached manifests |
 | Rust `core` / `compiler_builtins` (via the toolchain, `-Zbuild-std`) | MIT OR Apache-2.0 (with LLVM exception for parts of `compiler_builtins`) | Toolchain-provided runtime code |
 
 **Release obligation:** a published disk image must ship with the license texts
@@ -47,6 +47,26 @@ image.
 
 ## Not yet audited
 
-No automated license or advisory scan (for example `cargo deny`) is
+No automated advisory scan (for example `cargo deny`) is
 configured yet. Unsafe code and build scripts of guest dependencies have not
 been reviewed beyond identifying them.
+
+The experimental user-space display also links `gfx` and the same bitmap font.
+The font crate's MIT notice and Noto's OFL copyright/license are preserved in
+`licenses/noto-sans-mono-bitmap-MIT.txt` and `licenses/Noto-OFL.txt`.
+OFL source: https://raw.githubusercontent.com/notofonts/noto-fonts/main/LICENSE.
+Window controls and desktop symbols are original Rust drawing primitives under
+this project's MIT license; no external icon pack or branding is used.
+
+## Exact release inventory
+
+`cargo xtask release --release` collects the union of the workspace and exact
+UEFI-stage lockfile packages, including optional and host-only crates. The
+bundle includes each original crate archive (full source, including ucs2),
+root license/notice files, both lockfiles and declared licenses/checksums in
+`dependencies/INVENTORY.md`. Bootloader sibling crates share the root
+bootloader MIT/Apache notices. Noto font OFL is in source/licenses. Rust
+copyright and library notices, MIT/Apache and LLVM exception are included.
+Missing cached sources or license declarations fail packaging. This is a
+conservative distribution inventory, not a dependency vulnerability audit.
+Host-only SHA-256 tooling uses sha2 0.10.9 (MIT OR Apache-2.0), not guest code.

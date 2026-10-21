@@ -135,6 +135,17 @@ pub fn base_command(
     cmd
 }
 
+/// Interactive and power tests require real guest reset and power-off.
+/// Diagnostic smoke deliberately keeps its no-reboot/no-shutdown guards.
+pub fn enable_power(cmd: Command) -> Command {
+    let mut power = Command::new(cmd.get_program());
+    power.args(
+        cmd.get_args()
+            .filter(|a| *a != "-no-reboot" && *a != "-no-shutdown"),
+    );
+    power
+}
+
 /// Copy the vars template next to `dir` so the guest never modifies it.
 pub fn copy_vars(firmware: &Firmware, dir: &Path) -> Result<Option<PathBuf>, String> {
     let Some(template) = &firmware.vars else {

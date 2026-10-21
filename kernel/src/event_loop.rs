@@ -42,6 +42,7 @@ pub fn run(mut pipeline: Pipeline, mut ui: Option<Ui>) -> ! {
         pipeline.poll();
         while let Some(event) = pipeline.next_event() {
             log_event(&event);
+            crate::display_device::push(&event);
             if let InputEvent::Key(key) = event
                 && key.key == Key::F9
                 && key.pressed
@@ -74,7 +75,13 @@ pub fn run(mut pipeline: Pipeline, mut ui: Option<Ui>) -> ! {
                 ui.invalidate_panel();
                 next_panel_ms = uptime_ms + PANEL_REFRESH_MS;
             }
-            ui.render(&status(&pipeline));
+            let active = crate::display_device::active();
+            if crate::display_device::take_restore() {
+                ui.invalidate_screen();
+            }
+            if !active {
+                ui.render(&status(&pipeline));
+            }
         }
 
         arch::disable_interrupts();

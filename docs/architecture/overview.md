@@ -65,7 +65,7 @@ Rules that keep the later split possible:
 | `input` | lib, `no_std`, no `unsafe` | any | Interrupt-safe byte rings, scancode set 1 and PS/2 mouse decoders, pointer state, bounded event queue; see [interrupts-input.md](interrupts-input.md) |
 | `boot-data` | lib, `no_std`, no `unsafe` | any | Memory-map validation and copy; serial boot markers shared with `xtask smoke` |
 | `mm` | lib, `no_std`, `unsafe` only in the heap | any | Typed addresses, frame bitmap, page-table mapper (generic over table access), reclaiming free-list heap; see [memory.md](memory.md) |
-| `desktop` | lib, `no_std` | any | Desktop model: Computer/Files/Trash icons, power menu |
+| `desktop` | lib, `no_std` | any | Software display/window core, protocol, surfaces; Computer/Files/Trash and power policy |
 | `xtask` | bin, `std` | host | Build orchestration and repository checks |
 | `image-builder` | bin, `std` | host | Wraps the kernel ELF into a UEFI disk image |
 
@@ -89,3 +89,11 @@ user programs with `--target x86_64-unknown-none`.
 SMP, networking, GPU acceleration, USB beyond what a VM requires, audio, other
 architectures, and guest sleep. Sleep stays visibly disabled until genuine
 suspend/resume is implemented and tested.
+
+## Experimental display service
+
+The `desktop` kernel variant starts a ring-3 display service in place of the
+normal init test driver. Software composition and window policy use the pure
+`userspace/desktop` core; RGB row presentation and PS/2 input copies are the
+narrow kernel boundary. The normal image retains the diagnostic UI.
+See [display.md](display.md) for the protocol, memory ownership and controls.
