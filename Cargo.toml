@@ -8,6 +8,7 @@ members = [
     "crates/mm",
     "crates/input",
     "crates/exec",
+    "crates/storage",
     "userspace/desktop",
     "userspace/ulib",
     "userspace/apps",
@@ -23,6 +24,7 @@ default-members = [
     "crates/mm",
     "crates/input",
     "crates/exec",
+    "crates/storage",
     "userspace/desktop",
     "xtask",
 ]
@@ -41,6 +43,7 @@ boot-data = { path = "crates/boot-data" }
 mm = { path = "crates/mm" }
 input = { path = "crates/input" }
 exec = { path = "crates/exec" }
+storage = { path = "crates/storage" }
 ulib = { path = "userspace/ulib" }
 # Bitmap glyphs rasterized from Noto Sans Mono. Already compiled into the
 # bootloader's UEFI stage; only the sizes and weights we draw are enabled.

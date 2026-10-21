@@ -15,7 +15,10 @@ gfx.workspace = true
 # The program bundle format and the ELF checks the kernel's loader uses, so
 # a bad user program fails the build instead of the boot.
 exec.workspace = true
+storage.workspace = true
 os-abi.workspace = true
+desktop = { path = "../userspace/desktop" }
+sha2 = "=0.10.9"
 
 [lints]
 workspace = true

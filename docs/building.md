@@ -10,7 +10,7 @@ anything else is marked.
 | --- | --- | --- |
 | `rustup` | Installs the pinned toolchain from `rust-toolchain.toml` | Toolchain: `nightly-2026-10-08` with `rustfmt`, `clippy`, `rust-src`, `llvm-tools-preview`, target `x86_64-unknown-none` |
 | A host linker | Builds `xtask` and `image-builder` | Linux/macOS: the system C toolchain. Windows: MSVC Build Tools, **or** the `x86_64-pc-windows-gnullvm` host with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) on `PATH` (`rustup set default-host x86_64-pc-windows-gnullvm`) |
-| Network access, first `image` build only | `bootloader`'s build script runs `cargo install bootloader-x86_64-uefi` from crates.io | Cached afterwards in `target/` |
+| Network access, first `image` build and release-source fetch | `bootloader`'s build script runs `cargo install bootloader-x86_64-uefi` from crates.io | Cached afterwards in `target/` |
 | QEMU (`qemu-system-x86_64`) | `cargo xtask run`, `cargo xtask smoke` | Not needed for build or tests. Found on `PATH`, via `RUST_OS_QEMU`, or at `C:\Program Files\qemu` on Windows (`winget install SoftwareFreedomConservancy.QEMU`) |
 | OVMF UEFI firmware | `cargo xtask run`, `cargo xtask smoke` | Linux: your distribution's `ovmf`/`edk2-ovmf` package. Windows QEMU builds bundle it as `share\edk2-x86_64-code.fd` + `share\edk2-i386-vars.fd`. Common install locations are detected automatically |
 
@@ -30,6 +30,7 @@ newer. The kernel itself uses no nightly features.
 | `cargo xtask run [--ovmf-code <file>] [--ovmf-vars <file>] [--timeout <secs>] [--headless]` | Builds the image and starts QEMU with a display window and the serial port on stdio | Verified (Windows, QEMU 11.1.0) |
 | `cargo xtask smoke [--scenario boot\|panic\|no-display\|page-fault\|stack-overflow\|interrupt-fault\|input\|processes\|all] [--timeout <secs>] [--release]` | Automated boot test in headless QEMU; see below | Verified (Windows, QEMU 11.1.0, debug and release) |
 | `cargo xtask check-private` | Fails if private paths are tracked or staged, or if `.agent-private/` is not ignored | Verified (Windows) |
+| `cargo xtask storage-smoke [--release] [--timeout <secs>]` | Creates only a new designated disposable data disk, boots twice with clean guest shutdown and persistent bytes, then rejects a corrupted volume without writing it | See [FILESYSTEM.md](FILESYSTEM.md) |
 | `cargo xtask ci` | `lint` + `test` + `build` + `user` + `check-private` (no QEMU needed) | Verified (Windows) |
 
 `cargo xtask lint` does not lint `tools/image-builder`, because that compiles
@@ -51,8 +52,13 @@ The window shows the welcome screen; the terminal shows the serial log.
 `RUST_OS_OVMF_CODE` / `RUST_OS_OVMF_VARS` may replace the `--ovmf-*` options.
 The vars file is copied before use so the template is never modified.
 
-All QEMU runs use `-machine q35 -m 256M -smp 1 -no-reboot -no-shutdown`, the
+Diagnostic QEMU runs use `-machine q35 -m 256M -smp 1 -no-reboot -no-shutdown`, the
 firmware as pflash and the image as a raw disk.
+Interactive shell runs omit `-no-reboot -no-shutdown` so desktop power actions
+can reset the guest or exit QEMU. Diagnostic smoke retains both guards.
+The boot disk uses `snapshot=on` to protect its source file. Storage smoke
+adds a separate PIIX3 IDE data disk and omits `-no-shutdown` so guest S5
+must actually terminate QEMU. It does not accept arbitrary disk paths.
 
 ## What the kernel does at boot
 
@@ -185,3 +191,36 @@ enabled; neither has been tried.
 
 Passing in QEMU will not be taken as evidence for VirtualBox or VMware; each
 gets its own recorded test.
+
+## Experimental display variant
+
+`cargo xtask desktop --release` boots the ring-3 graphical shell. The older two-client demo remains the `desktop` smoke scenario. `cargo xtask smoke --scenario desktop` and the same command with
+`--release` test this variant with QMP input and screenshot checks. `smoke`
+now includes this ninth scenario. This variant's separate kernel/image paths
+use `target/fault-tests/desktop/` and `rust-os-uefi-desktop.img`; despite the
+historical directory name it is not a deliberate kernel-fault build.
+Use `cargo xtask diagnostics` to exercise the original diagnostic UI and init tests.
+See [display.md](architecture/display.md) for the exact protocol and limits.
+
+## Graphical shell
+
+The normal interactive command `cargo xtask run` now boots the ring-3 shell.
+Use `cargo xtask diagnostics` for the prior diagnostic UI. The normal kernel
+build and existing smoke scenarios retain their diagnostic configuration.
+`cargo xtask shell-smoke [--release]` tests shell interaction and preferences
+on a freshly created disposable disk across two boots; see [desktop.md](desktop.md).
+
+Files/Trash interaction and two-boot persistence checks run in `cargo xtask shell-smoke [--release]`; see [files.md](files.md).
+
+Shell smoke also requires real guest restart and shutdown, with file-byte
+verification after clean exit. `cargo xtask vm-images --release` produces shell
+raw/VDI/VMDK candidates; see [power/VM configurations and limits](power.md).
+`cargo xtask power-smoke [--release]` focuses on cancellation, actual guest reset,
+S5 exit and exact persisted preference bytes, without the Files navigation stress.
+
+## Release validation tools
+
+`cargo xtask robustness` runs deterministic host parser mutations and persistent
+filesystem lifecycle stress. `cargo xtask stress --release` runs five bounded
+process/input VM cycles with separate evidence. `cargo xtask release --release`
+stages a versioned review bundle without publishing. See [release instructions](release.md).

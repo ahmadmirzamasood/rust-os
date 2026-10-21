@@ -38,6 +38,7 @@ pub mod interrupts;
 pub mod pic;
 pub mod pit;
 pub mod probe;
+pub mod storage_io;
 pub mod switch;
 pub mod tables;
 

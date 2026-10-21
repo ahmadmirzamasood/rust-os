@@ -2,8 +2,12 @@
 
 mod picture;
 mod qemu;
+mod release;
+mod robustness;
 mod smoke;
+mod storage_test;
 mod user;
+mod vm_images;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -29,6 +33,7 @@ const PRIVATE_PREFIXES: &[&str] = &[
     ".agent-private/",
     "GETTING_STARTED_PRIVATE.md",
     "docs/prompts/",
+    "docs/PROMPTS.md",
     "docs/phases/",
     "docs/project/",
     "docs/subsystems/",
@@ -37,6 +42,13 @@ const PRIVATE_PREFIXES: &[&str] = &[
     "private/",
     ".claude/",
     ".codex/",
+    "AGENTS.local.md",
+    "CLAUDE.local.md",
+    "MEMORY.md",
+    "QUERY.md",
+    "QUERIES.md",
+    "PROMPTS.md",
+    "rust-os-implementation-pack.zip",
 ];
 
 const HELP: &str = "\
@@ -50,8 +62,17 @@ commands:
   user            build the user programs, validate them, write the program bundle
   image           build kernel, user programs and a UEFI GPT disk image whose
                   ramdisk is the program bundle (network on first run)
-  run             build the image and boot it in QEMU (window + serial on stdio)
+  desktop         boot the graphical desktop shell
+  shell-smoke     disposable disk: shell navigation and reboot preferences
+  power-smoke     focused desktop cancel/restart/shutdown and saved-byte checks
+  vm-images       shell raw/VDI/VMDK images; conversion is not VM validation
+  robustness      deterministic parser mutation and filesystem lifecycle stress
+  stress          five bounded process/input VM cycles with separate evidence
+  release         stage versioned shell image, public source, licenses and hashes
+  run             boot the graphical desktop in QEMU
+  diagnostics     boot the original diagnostic UI and process tests
   smoke           boot smoke test in headless QEMU: serial markers + screenshot check
+  storage-smoke   disposable disk: two clean VM shutdowns/reboots and corrupt mount
   check-private   fail if private paths are tracked or staged in Git
   ci              lint + test + build + user + check-private (no QEMU needed)
   help            show this message
@@ -64,7 +85,7 @@ options:
                             smoke: per-scenario limit (default: 120)
   --headless                run: no display window
   --scenario <name>         smoke: boot, panic, no-display, page-fault,
-                            stack-overflow, interrupt-fault, input, processes
+                            stack-overflow, interrupt-fault, input, processes, desktop
                             or all (default: all)
 
 QEMU is `qemu-system-x86_64` from PATH, or RUST_OS_QEMU.
@@ -89,8 +110,17 @@ fn main() -> ExitCode {
         "build" => build_kernel(&options, KernelVariant::Normal).map(drop),
         "user" => user::build_bundle(&options).map(drop),
         "image" => build_image(&options, KernelVariant::Normal).map(drop),
-        "run" => run(&options),
+        "vm-images" => vm_images::run(&options),
+        "robustness" => robustness::run(),
+        "stress" => stress(&options),
+        "release" => release::run(&options),
+        "run" => run(&options, KernelVariant::FaultTest("shell")),
+        "diagnostics" => run(&options, KernelVariant::Normal),
+        "desktop" => run(&options, KernelVariant::FaultTest("shell")),
         "smoke" => smoke(&options),
+        "storage-smoke" => storage_test::run(&options),
+        "shell-smoke" => smoke::shell_run(&options),
+        "power-smoke" => smoke::power_run(&options),
         "check-private" => check_private(),
         "ci" => lint()
             .and_then(|()| test())
@@ -236,7 +266,10 @@ fn lint() -> Result<(), String> {
     host.args(["clippy", "--all-targets", "--", "-D", "warnings"]);
     status(host)?;
 
-    let variants = std::iter::once(None).chain(FAULT_TEST_FEATURES.map(Some));
+    let variants = std::iter::once(Some("shell"))
+        .chain(std::iter::once(Some("desktop")))
+        .chain(std::iter::once(None))
+        .chain(FAULT_TEST_FEATURES.map(Some));
     for features in variants {
         let mut kernel = cargo();
         kernel.args(["clippy", "--package", "kernel", "--target", KERNEL_TARGET]);
@@ -294,14 +327,34 @@ fn build_image(options: &Options, variant: KernelVariant) -> Result<PathBuf, Str
     Ok(image)
 }
 
-fn run(options: &Options) -> Result<(), String> {
+fn run(options: &Options, variant: KernelVariant) -> Result<(), String> {
     let firmware = options.firmware()?;
     let qemu = qemu::program()?;
-    let image = build_image(options, KernelVariant::Normal)?;
+    let image = build_image(options, variant)?;
     let image_dir = image.parent().ok_or("image has no parent directory")?;
     let vars = qemu::copy_vars(&firmware, image_dir)?;
 
     let mut cmd = qemu::base_command(&qemu, &firmware, vars.as_deref(), &image);
+    if variant == KernelVariant::FaultTest("shell") {
+        cmd = qemu::enable_power(cmd);
+        // A fixed project-owned regular image, never a caller-supplied host disk.
+        // Create exclusively once; the guest rejects corruption without formatting.
+        let data_dir = workspace_root().join("target/desktop-data");
+        std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+        let data = data_dir.join("DISPOSABLE-rsfs.img");
+        if !data.try_exists().map_err(|e| e.to_string())? {
+            storage_test::fresh_disk(&data)?;
+        }
+        cmd.args(["-device", "piix3-ide,id=databus"]);
+        cmd.arg("-drive").arg(format!(
+            "if=none,id=data,format=raw,cache=writeback,file={}",
+            data.display()
+        ));
+        cmd.args([
+            "-device",
+            "ide-hd,drive=data,bus=databus.0,unit=0,serial=RUSTOS-DISPOSABLE",
+        ]);
+    }
     cmd.args(["-serial", "stdio"]);
     if options.headless {
         cmd.args(["-display", "none"]);
@@ -331,6 +384,34 @@ fn run(options: &Options) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn stress(options: &Options) -> Result<(), String> {
+    let image = build_image(options, KernelVariant::Normal)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    for round in 0..5 {
+        let setup = smoke::Setup {
+            qemu: qemu::program()?,
+            firmware: options.firmware()?,
+            timeout: options.timeout.unwrap_or(SMOKE_TIMEOUT),
+            out_root: workspace_root()
+                .join("target/stress")
+                .join(format!("{}-{stamp}/{round}", options.profile_dir())),
+        };
+        for scenario in [Scenario::Processes, Scenario::Input] {
+            eprintln!(
+                "stress round {round}: {}",
+                smoke::run(scenario, &image, &setup)?
+            );
+        }
+    }
+    eprintln!(
+        "stress PASS: five process/input cycles; each boot includes memory and scheduler self-tests"
+    );
+    Ok(())
 }
 
 fn smoke(options: &Options) -> Result<(), String> {
@@ -455,6 +536,9 @@ mod tests {
         assert!(is_private(".Agent-Private/x"));
         assert!(is_private("GETTING_STARTED_PRIVATE.md"));
         assert!(is_private("docs/prompts/00.md"));
+        assert!(is_private("docs/PROMPTS.md"));
+        assert!(is_private("docs/Prompts/request.md"));
+        assert!(is_private("AGENTS.local.md"));
     }
 
     #[test]

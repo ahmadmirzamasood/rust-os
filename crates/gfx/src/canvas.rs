@@ -164,6 +164,30 @@ impl<'a> Canvas<'a> {
         true
     }
 
+    /// Copy a row of RGB pixels, clipped horizontally and vertically. This
+    /// avoids repeating rectangle clipping for every pixel of a surface.
+    pub fn blit_pixels(&mut self, x: i32, y: i32, pixels: &[Rgb]) {
+        if y < 0 || y as usize >= self.height() {
+            return;
+        }
+        let skip = (-(i64::from(x))).max(0) as usize;
+        if skip >= pixels.len() {
+            return;
+        }
+        let start_x = x.max(0) as usize;
+        if start_x >= self.width() {
+            return;
+        }
+        let count = (pixels.len() - skip).min(self.width() - start_x);
+        let bpp = self.layout.bytes_per_pixel();
+        let offset = (y as usize * self.layout.stride() + start_x) * bpp;
+        for (target, color) in self.buf[offset..offset + count * bpp]
+            .chunks_exact_mut(bpp)
+            .zip(&pixels[skip..skip + count])
+        {
+            target.copy_from_slice(&self.layout.encode(*color)[..bpp]);
+        }
+    }
     /// Write one encoded pixel if (`x`, `y`) is on screen.
     fn put(&mut self, x: i64, y: i64, px: &[u8; 4]) {
         self.fill_span_rows(x, y, x + 1, y + 1, px);
@@ -249,6 +273,22 @@ mod tests {
             Canvas::new(&mut buf, layout),
             Err(LayoutError::BufferTooSmall { .. })
         ));
+    }
+
+    #[test]
+    fn pixel_rows_clip_preserve_padding_and_encode_bgr() {
+        let layout = Layout::new(3, 2, 5, 4, PixelFormat::Bgr).unwrap();
+        let mut bytes = canvas_buf(&layout);
+        let colors = [Rgb::new(1, 2, 3), Rgb::new(4, 5, 6), Rgb::new(7, 8, 9)];
+        let mut canvas = Canvas::new(&mut bytes, layout).unwrap();
+        canvas.blit_pixels(-1, 1, &colors);
+        canvas.blit_pixels(i32::MIN, 0, &colors);
+        canvas.blit_pixels(i32::MAX, 0, &colors);
+        canvas.blit_pixels(0, -1, &colors);
+        canvas.blit_pixels(0, 2, &colors);
+        assert_eq!(&bytes[20..28], &[6, 5, 4, 0, 9, 8, 7, 0]);
+        assert!(bytes[..20].iter().all(|b| *b == PAD));
+        assert!(bytes[28..].iter().all(|b| *b == PAD));
     }
 
     #[test]

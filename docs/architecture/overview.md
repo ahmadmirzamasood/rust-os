@@ -19,7 +19,7 @@ UEFI firmware (OVMF, external)
             ├─ boot info: validate, copy memory map   crates/boot-data/ + kernel/src/main.rs
             ├─ memory: frames, mapping, stacks, heap  crates/mm/ + kernel/src/memory/
             ├─ drivers: 16550 serial (COM1)           kernel/src/serial.rs
-            │           PS/2 keyboard + mouse          kernel/src/drivers/ (block planned)
+            │           PS/2 keyboard + mouse, ATA PIO kernel/src/drivers/
             ├─ time: tick counter, TSC clock          kernel/src/time.rs
             ├─ input: rings, decoders, pointer        crates/input/ + kernel/src/input_events.rs
             ├─ event loop + input-debug screen        kernel/src/event_loop.rs, kernel/src/ui.rs
@@ -28,7 +28,7 @@ UEFI firmware (OVMF, external)
             ├─ threads: scheduler, context switch     kernel/src/sched/, arch/x86_64/switch.rs
             ├─ processes: address spaces, loader,     kernel/src/process/, memory/user.rs,
             │  handles, channels, system calls          syscall.rs, programs.rs, crates/exec/
-            ├─ vfs + filesystems                      (planned)
+            ├─ vfs + RAM/RSFS1 filesystems             crates/storage/, kernel/src/storage.rs
             ├─ power: shutdown, restart               (planned)
             └─ trusted modules (linked in for now)
                  └─ desktop model                     userspace/desktop/
@@ -65,7 +65,7 @@ Rules that keep the later split possible:
 | `input` | lib, `no_std`, no `unsafe` | any | Interrupt-safe byte rings, scancode set 1 and PS/2 mouse decoders, pointer state, bounded event queue; see [interrupts-input.md](interrupts-input.md) |
 | `boot-data` | lib, `no_std`, no `unsafe` | any | Memory-map validation and copy; serial boot markers shared with `xtask smoke` |
 | `mm` | lib, `no_std`, `unsafe` only in the heap | any | Typed addresses, frame bitmap, page-table mapper (generic over table access), reclaiming free-list heap; see [memory.md](memory.md) |
-| `desktop` | lib, `no_std` | any | Desktop model: Computer/Files/Trash icons, power menu |
+| `desktop` | lib, `no_std` | any | Software display/window core, protocol, surfaces; Computer/Files/Trash and power policy |
 | `xtask` | bin, `std` | host | Build orchestration and repository checks |
 | `image-builder` | bin, `std` | host | Wraps the kernel ELF into a UEFI disk image |
 
@@ -89,3 +89,11 @@ user programs with `--target x86_64-unknown-none`.
 SMP, networking, GPU acceleration, USB beyond what a VM requires, audio, other
 architectures, and guest sleep. Sleep stays visibly disabled until genuine
 suspend/resume is implemented and tested.
+
+## Experimental display service
+
+The `desktop` kernel variant starts a ring-3 display service in place of the
+normal init test driver. Software composition and window policy use the pure
+`userspace/desktop` core; RGB row presentation and PS/2 input copies are the
+narrow kernel boundary. The normal image retains the diagnostic UI.
+See [display.md](display.md) for the protocol, memory ownership and controls.

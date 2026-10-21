@@ -129,10 +129,21 @@ pub fn base_command(
     if let Some(vars) = vars_copy {
         cmd.arg("-drive").arg(pflash(vars, false));
     }
-    let mut disk = OsString::from("format=raw,file=");
+    let mut disk = OsString::from("format=raw,snapshot=on,file=");
     disk.push(image);
     cmd.arg("-drive").arg(disk);
     cmd
+}
+
+/// Interactive and power tests require real guest reset and power-off.
+/// Diagnostic smoke deliberately keeps its no-reboot/no-shutdown guards.
+pub fn enable_power(cmd: Command) -> Command {
+    let mut power = Command::new(cmd.get_program());
+    power.args(
+        cmd.get_args()
+            .filter(|a| *a != "-no-reboot" && *a != "-no-shutdown"),
+    );
+    power
 }
 
 /// Copy the vars template next to `dir` so the guest never modifies it.

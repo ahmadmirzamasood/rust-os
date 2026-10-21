@@ -63,8 +63,199 @@ fn main() -> i32 {
     preemption(&mut t);
     faults(&mut t);
     validation(&mut t);
+    files(&mut t);
     println!("init: {} checks passed, {} failed", t.passed, t.failed);
+    if t.failed == 0 && ulib::fs::persistent() == Ok(true) {
+        println!("STORAGE USER TESTS PASS");
+        let _ = ulib::fs::test_shutdown();
+        return 1;
+    }
     t.failed as i32
+}
+
+fn files(t: &mut Tally) {
+    use ulib::{
+        Error,
+        fs::{self, File},
+    };
+    let result = (|| -> ulib::Result<()> {
+        let persistent = fs::persistent()?;
+        let mut b = [0; 128];
+        if persistent {
+            match File::open("/persist", false, false) {
+                Ok(f) => {
+                    t.check(
+                        "storage: reboot bytes",
+                        f.read(0, &mut b) == Ok(17) && &b[..17] == b"survives a reboot",
+                    );
+                    t.check(
+                        "storage: reboot directory",
+                        fs::list("/saved", &mut b) == Ok(6) && &b[..6] == b"child\n",
+                    );
+                    println!("STORAGE REBOOT READ PASS");
+                }
+                Err(Error::NotFound) => {
+                    let f = File::open("/persist", true, true)?;
+                    f.write(0, b"survives a reboot")?;
+                    fs::mkdir("/saved")?;
+                    let child = File::open("/saved/child", true, true)?;
+                    child.write(0, b"child data")?;
+                    println!("STORAGE FIRST WRITE PASS");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        fs::mkdir("/test")?;
+        let f = File::open("/test/file", true, true)?;
+        t.check(
+            "files: write and read",
+            f.write(0, b"hello") == Ok(5) && f.read(0, &mut b) == Ok(5) && &b[..5] == b"hello",
+        );
+        fs::rename("/test/file", "/test/renamed")?;
+        t.check("files: rename preserves handle", f.read(0, &mut b) == Ok(5));
+        t.check(
+            "files: list",
+            fs::list("/test", &mut b) == Ok(8) && &b[..8] == b"renamed\n",
+        );
+        let ro = File::open("/test/renamed", false, false)?;
+        let (mine, theirs) = Channel::pair()?;
+        let probe = Process::spawn("fileprobe", Some(theirs))?;
+        mine.send(&f.raw().to_le_bytes())?;
+        t.check(
+            "files: foreign handles and shutdown denied",
+            probe.wait() == Ok(ExitStatus::Exited(0)),
+        );
+        drop(probe);
+        drop(mine);
+        t.check(
+            "files: read-only handle",
+            ro.write(0, b"x") == Err(Error::PermissionDenied),
+        );
+        t.check(
+            "files: file full",
+            f.write(4096, b"x") == Err(Error::NoSpace),
+        );
+        t.check(
+            "files: nonempty directory",
+            fs::remove("/test") == Err(Error::NotEmpty),
+        );
+        t.check(
+            "files: missing",
+            matches!(File::open("/missing", false, false), Err(Error::NotFound)),
+        );
+        t.check(
+            "files: traversal",
+            fs::mkdir("/../../escape") == Err(Error::InvalidArgument),
+        );
+        t.check(
+            "files: create requires write",
+            matches!(
+                File::open("/badflags", false, true),
+                Err(Error::InvalidArgument)
+            ),
+        );
+        t.check(
+            "files: directory handle rejected",
+            matches!(File::open("/test", false, false), Err(Error::IsDirectory)),
+        );
+        t.check(
+            "files: duplicate create",
+            matches!(
+                File::open("/test/renamed", true, true),
+                Err(Error::AlreadyExists)
+            ),
+        );
+        // SAFETY: source path is a live immutable string; null destination
+        // is intentionally invalid and must be rejected before mutation.
+        let bad = unsafe {
+            ulib::sys::syscall(
+                os_abi::syscall::FS_RENAME,
+                "/test/renamed".as_ptr() as u64,
+                13,
+                0,
+                4,
+            )
+        };
+        t.check(
+            "files: invalid rename destination",
+            os_abi::decode_result(bad) == Err(Error::BadAddress),
+        );
+        // SAFETY: deliberately invalid addresses are rejected by the kernel;
+        // no Rust object is exposed or aliased by these calls.
+        let bad =
+            unsafe { ulib::sys::syscall(os_abi::syscall::FILE_READ, f.raw() as u64, 0, 8, 0) };
+        t.check(
+            "files: invalid output pointer",
+            os_abi::decode_result(bad) == Err(Error::BadAddress),
+        );
+        // SAFETY: null input is deliberately invalid, no live Rust memory.
+        let bad =
+            unsafe { ulib::sys::syscall(os_abi::syscall::FILE_WRITE, f.raw() as u64, 0, 8, 0) };
+        t.check(
+            "files: invalid input pointer",
+            os_abi::decode_result(bad) == Err(Error::BadAddress),
+        );
+        t.check(
+            "files: invalid write preserved bytes",
+            f.read(0, &mut b) == Ok(5) && &b[..5] == b"hello",
+        );
+        fs::remove("/test/renamed")?;
+        t.check(
+            "files: deleted handle",
+            f.read(0, &mut b) == Err(Error::NotFound),
+        );
+        let stale = f.raw();
+        drop(f);
+        // SAFETY: a valid exclusive output buffer; stale handle is intentional.
+        let bad = unsafe {
+            ulib::sys::syscall(
+                os_abi::syscall::FILE_READ,
+                stale as u64,
+                b.as_mut_ptr() as u64,
+                8,
+                0,
+            )
+        };
+        t.check(
+            "files: closed handle",
+            os_abi::decode_result(bad) == Err(Error::BadHandle),
+        );
+        fs::remove("/test")?;
+        drop(ro);
+        // Fill the entry table, without holding a handle per file. Names are
+        // bounded and deterministic; remove only the files created here.
+        let mut made = 0u8;
+        for i in 0..65u8 {
+            let name = [b'/', b'z', b'0' + i / 10, b'0' + i % 10];
+            let name = core::str::from_utf8(&name).map_err(|_| Error::InvalidArgument)?;
+            match File::open(name, true, true) {
+                Ok(_) => made += 1,
+                Err(Error::NoSpace) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        t.check(
+            "files: volume full",
+            made == if persistent { 61 } else { 64 },
+        );
+        t.check(
+            "files: full rejects create",
+            matches!(File::open("/full", true, true), Err(Error::NoSpace)),
+        );
+        for i in 0..made {
+            let name = [b'/', b'z', b'0' + i / 10, b'0' + i % 10];
+            fs::remove(core::str::from_utf8(&name).map_err(|_| Error::InvalidArgument)?)?;
+        }
+        let replacement = File::open("/reused", true, true)?;
+        replacement.write(0, b"space reclaimed")?;
+        fs::remove("/reused")?;
+        fs::sync()?;
+        Ok(())
+    })();
+    t.check("files: integration sequence", result.is_ok());
+    if let Err(e) = result {
+        println!("files: {}", e.name());
+    }
 }
 
 fn ipc(t: &mut Tally) {
@@ -113,11 +304,25 @@ fn preemption(t: &mut Tally) {
     let mut ends = [0u64; SPINNERS];
     let mut iterations = [0u64; SPINNERS];
     let mut protocol_ok = true;
+    // Every child is loaded and waiting before any measured spin begins.
+    // Fixed time-from-spawn windows fail under slow image loading/host stalls.
+    for (channel, _) in spinners.iter().flatten() {
+        protocol_ok &= matches!(receive3(channel), Some((0, 0, 0)));
+    }
+    for (channel, _) in spinners.iter().flatten() {
+        protocol_ok &= channel.send(b"go").is_ok();
+    }
     for (i, (channel, _)) in spinners.iter().flatten().enumerate() {
         match receive3(channel) {
             Some((SPIN_START, start, _)) => starts[i] = start,
             _ => protocol_ok = false,
         }
+    }
+    // Workers do not yield or block between START and DONE. Receiving all
+    // START messages while they keep computing therefore requires preemption.
+    ulib::sleep_ms(300);
+    for (channel, _) in spinners.iter().flatten() {
+        protocol_ok &= channel.send(b"stop").is_ok();
     }
     for (i, (channel, _)) in spinners.iter().flatten().enumerate() {
         match receive3(channel) {

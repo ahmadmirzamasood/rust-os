@@ -38,7 +38,10 @@
 //! calls check their condition and call `sched::block` with interrupts
 //! disabled in between, so a wake-up cannot be lost.
 
+pub mod display;
+pub mod files;
 pub mod loader;
+pub mod power;
 
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -64,6 +67,7 @@ type Name = ([u8; limits::NAME_MAX], usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Object {
+    File { id: u64, writable: bool },
     Channel { index: usize, side: usize },
     Process { slot: usize, pid: u32 },
 }
@@ -94,6 +98,7 @@ struct Process {
     started_ns: u64,
     /// The kernel reports this process's exit as the process-test verdict.
     test_driver: bool,
+    display_service: bool,
 }
 
 impl Process {
@@ -110,6 +115,7 @@ impl Process {
         refs: 0,
         started_ns: 0,
         test_driver: false,
+        display_service: false,
     };
 
     fn lookup(&self, value: u64) -> Result<Object, Error> {
@@ -263,6 +269,7 @@ impl Table {
     /// Drop one reference to `object` (its handle was closed).
     fn release(&mut self, object: Object) {
         match object {
+            Object::File { .. } => {}
             Object::Channel { index, side } => {
                 let channel = self.channel(index);
                 channel.open[side] = false;
@@ -382,7 +389,7 @@ fn start(
             if transfer != 0 {
                 match t.processes[parent].lookup(transfer)? {
                     Object::Channel { .. } => {}
-                    Object::Process { .. } => return Err(Error::WrongType),
+                    _ => return Err(Error::WrongType),
                 }
             } else if t.processes[parent].free_handles() == 0 {
                 // (A transferred handle frees the slot the process handle
@@ -401,6 +408,9 @@ fn start(
             refs: u32::from(parent.is_some()),
             started_ns: time::uptime_ns(),
             test_driver,
+            display_service: cfg!(feature = "desktop")
+                && parent.is_none()
+                && (name == b"display" || (cfg!(feature = "shell") && name == b"shell")),
         };
         let mut child_handle = 0;
         let mut parent_handle = 0;
@@ -441,12 +451,28 @@ pub fn start_init(name: &str) -> Result<u32, StartError> {
     start(name.as_bytes(), None, 0, true).map(|(pid, _)| pid)
 }
 
+/// Start the bundled display as a boot service, without process-test reporting.
+pub fn start_display() -> Result<u32, StartError> {
+    start(
+        if cfg!(feature = "shell") {
+            b"shell"
+        } else {
+            b"display"
+        },
+        None,
+        0,
+        false,
+    )
+    .map(|(pid, _)| pid)
+}
+
 // --- Ending ----------------------------------------------------------------
 
 /// End the calling process with `status`. Never returns.
 pub fn exit_current(status: ExitStatus) -> ! {
     let pid = sched::current_pid();
     let thread = sched::current();
+    crate::display_device::release(pid);
     let stats = sched::stats(thread).unwrap_or_default();
     let ended = TABLE.with(|t| {
         let slot = t.slot_of(pid)?;
@@ -648,7 +674,7 @@ pub fn spawn(name_ptr: u64, name_len: u64, transfer: u64) -> Result<u64, Error> 
         if transfer != 0 {
             match t.processes[slot].lookup(transfer)? {
                 Object::Channel { .. } => {}
-                Object::Process { .. } => return Err(Error::WrongType),
+                _ => return Err(Error::WrongType),
             }
         }
         Ok(slot)
@@ -671,7 +697,7 @@ pub fn wait(handle: u64) -> Result<u64, Error> {
                         _ => Err(Error::BadHandle),
                     }
                 }
-                Object::Channel { .. } => Err(Error::WrongType),
+                _ => Err(Error::WrongType),
             });
             if let Ok(Err(key)) = step {
                 sched::block(Wait::Object(key));
@@ -731,7 +757,7 @@ pub fn channel_create(out: u64) -> Result<u64, Error> {
 fn endpoint(t: &Table, slot: usize, handle: u64) -> Result<(usize, usize), Error> {
     match t.processes[slot].lookup(handle)? {
         Object::Channel { index, side } => Ok((index, side)),
-        Object::Process { .. } => Err(Error::WrongType),
+        _ => Err(Error::WrongType),
     }
 }
 

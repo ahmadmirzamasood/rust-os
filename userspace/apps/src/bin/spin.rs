@@ -1,8 +1,9 @@
 //! `spin`: CPU-bound worker used to show preemptive scheduling.
 //!
-//! Sends `[START, clock_ns, 0]` on its startup channel, computes without
-//! ever yielding for [`SPIN_MS`] of wall-clock time, then sends
-//! `[DONE, iterations, clock_ns]` (three little-endian `u64`) and exits 0.
+//! Sends READY and waits for GO before starting the measured interval.
+//! Sends `[START, clock_ns, 0]`, computes without yielding or blocking until
+//! STOP, then sends `[DONE, iterations, clock_ns]` and exits 0. A hard
+//! deadline fails the test if coordination or preemption stops working.
 //! Several spinners can only overlap in time if the kernel preempts them.
 
 #![no_std]
@@ -12,7 +13,7 @@ ulib::entry!(main);
 
 pub const START: u64 = 1;
 pub const DONE: u64 = 2;
-const SPIN_MS: u64 = 300;
+const HARD_LIMIT_MS: u64 = 10_000;
 /// Iterations between clock reads, so nearly all time is spent in pure
 /// user-mode computation rather than in system calls.
 const BATCH: u64 = 20_000;
@@ -29,11 +30,18 @@ fn main() -> i32 {
     let Some(channel) = ulib::startup_channel() else {
         return 3;
     };
+    if channel.send(&message(0, 0, 0)).is_err() {
+        return 2;
+    }
+    let mut command = [0; 4];
+    if channel.recv(&mut command) != Ok(2) || &command[..2] != b"go" {
+        return 2;
+    }
     let start = ulib::clock_ns();
     if channel.send(&message(START, start, 0)).is_err() {
         return 2;
     }
-    let deadline = start + SPIN_MS * 1_000_000;
+    let deadline = start + HARD_LIMIT_MS * 1_000_000;
     let mut iterations = 0u64;
     let mut state = 0x2545_f491_4f6c_dd1du64;
     loop {
@@ -46,11 +54,19 @@ fn main() -> i32 {
         iterations += BATCH;
         core::hint::black_box(state);
         let now = ulib::clock_ns();
+        match channel.try_recv(&mut command) {
+            Ok(4) if command == *b"stop" => {
+                return match channel.send(&message(DONE, iterations, now)) {
+                    Ok(()) => 0,
+                    Err(_) => 2,
+                };
+            }
+            Err(ulib::Error::WouldBlock) => {}
+            _ => return 2,
+        }
         if now >= deadline {
-            return match channel.send(&message(DONE, iterations, now)) {
-                Ok(()) => 0,
-                Err(_) => 2,
-            };
+            let _ = channel.send(&message(DONE, iterations, now));
+            return 4;
         }
     }
 }

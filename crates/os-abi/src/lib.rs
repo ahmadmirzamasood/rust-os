@@ -22,6 +22,7 @@
 ///
 /// - 0: power types only (no system calls).
 /// - 1: first system-call set (see [`syscall`]).
+///   File calls 12..21 are additive; older v1 kernels return UnknownSyscall.
 pub const ABI_VERSION: u32 = 1;
 
 /// System-call numbers and calling convention.
@@ -77,7 +78,40 @@ pub mod syscall {
     pub const CHANNEL_RECV: u64 = 11;
 
     /// Number of defined calls (numbers are `0..COUNT`).
-    pub const COUNT: u64 = 12;
+    pub const COUNT: u64 = 27;
+    /// Root shell only: 0 queries bits (shutdown=1, restart=2); 1 shuts down,
+    /// 2 restarts after final flush. Other actions/reserved arguments rejected.
+    pub const POWER: u64 = 26;
+    /// One writeback sector/flush; returns 1 when complete, 0 while pending.
+    /// Mutations return WouldBlock during writeback; reads remain available.
+    pub const FS_SYNC_STEP: u64 = 25;
+    /// Bundled display only, desktop kernel: dimensions, RGB row copy, input packet.
+    pub const DISPLAY_INFO: u64 = 22;
+    pub const DISPLAY_ROW: u64 = 23;
+    pub const DISPLAY_INPUT: u64 = 24;
+
+    /// `(path_ptr, path_len, flags) -> handle`; flags WRITE=1, CREATE=2.
+    /// CREATE is exclusive and requires WRITE. Handles are process-owned.
+    pub const FILE_OPEN: u64 = 12;
+    /// `(handle, out_ptr, capacity, offset) -> bytes`; at most 4096 bytes.
+    pub const FILE_READ: u64 = 13;
+    /// `(handle, ptr, len, offset) -> bytes`; at most 4096 bytes, no partial writes.
+    pub const FILE_WRITE: u64 = 14;
+    /// `(path_ptr, path_len, out_ptr, capacity) -> bytes`; newline listing.
+    pub const FS_LIST: u64 = 15;
+    /// `(path_ptr, path_len) -> 0`.
+    pub const FS_MKDIR: u64 = 16;
+    /// `(from_ptr, from_len, to_ptr, to_len) -> 0`; no overwrite.
+    pub const FS_RENAME: u64 = 17;
+    /// `(path_ptr, path_len) -> 0`; only empty directories may be removed.
+    pub const FS_REMOVE: u64 = 18;
+    /// `() -> 0`; flush the entire volume, close does not flush.
+    pub const FS_SYNC: u64 = 19;
+    /// `() -> 0 (temporary RAM) or 1 (RSFS1 disposable disk)`.
+    pub const FS_VOLUME: u64 = 20;
+    /// `() -> !`; init only, designated QEMU data disk only. Flush then
+    /// Q35 test-machine power-off. Not a general ACPI implementation.
+    pub const FS_TEST_SHUTDOWN: u64 = 21;
 
     /// `CHANNEL_RECV` flag: fail with `WouldBlock` instead of waiting.
     pub const RECV_NONBLOCK: u64 = 1;
@@ -159,10 +193,19 @@ pub enum Error {
     PeerClosed = 10,
     /// The next message does not fit the buffer (it stays queued).
     BufferTooSmall = 11,
+    AlreadyExists = 12,
+    NotDirectory = 13,
+    IsDirectory = 14,
+    NotEmpty = 15,
+    NoSpace = 16,
+    Io = 17,
+    Corrupt = 18,
+    ReadOnly = 19,
+    PermissionDenied = 20,
 }
 
 impl Error {
-    pub const ALL: [Error; 11] = [
+    pub const ALL: [Error; 20] = [
         Self::UnknownSyscall,
         Self::InvalidArgument,
         Self::BadAddress,
@@ -174,6 +217,15 @@ impl Error {
         Self::WouldBlock,
         Self::PeerClosed,
         Self::BufferTooSmall,
+        Self::AlreadyExists,
+        Self::NotDirectory,
+        Self::IsDirectory,
+        Self::NotEmpty,
+        Self::NoSpace,
+        Self::Io,
+        Self::Corrupt,
+        Self::ReadOnly,
+        Self::PermissionDenied,
     ];
 
     pub const fn code(self) -> u16 {
@@ -197,6 +249,15 @@ impl Error {
             Self::WouldBlock => "would block",
             Self::PeerClosed => "peer closed",
             Self::BufferTooSmall => "buffer too small",
+            Self::AlreadyExists => "already exists",
+            Self::NotDirectory => "not a directory",
+            Self::IsDirectory => "is a directory",
+            Self::NotEmpty => "directory not empty",
+            Self::NoSpace => "disk full",
+            Self::Io => "storage I/O error",
+            Self::Corrupt => "corrupt volume",
+            Self::ReadOnly => "read-only volume",
+            Self::PermissionDenied => "permission denied",
         }
     }
 }

@@ -1,8 +1,7 @@
 //! Desktop shell model.
 //!
-//! Pure, host-testable state for the desktop: which icons exist and what they
-//! open. Rendering, input and window management live elsewhere and are not
-//! implemented yet. This crate must never touch hardware directly.
+//! Pure, host-testable desktop policy plus the bounded software display core.
+//! The ring-3 display executable drives this crate; it never touches hardware.
 
 #![no_std]
 
@@ -106,3 +105,8 @@ mod tests {
         );
     }
 }
+
+pub mod display;
+pub mod shell;
+
+pub mod files;

@@ -3,7 +3,7 @@
 The project is at an early stage: the kernel boots in QEMU, self-tests
 memory management, interrupts and its scheduler, runs its own test programs
 as isolated user processes and shows a welcome screen with an input panel;
-nothing is usable yet. Focused, well-tested
+the bounded Files/Trash desktop is experimental. Focused, well-tested
 changes are welcome. Open an issue first for anything larger than a small fix.
 
 ## Before you start
@@ -46,6 +46,12 @@ If you touched the kernel, `crates/gfx`, `crates/boot-data`, `crates/mm`,
 (needs QEMU and OVMF). If you claim anything boots, include the exact command,
 VM and firmware versions, and the serial output. Never describe untested
 behavior as working.
+
+For storage, file syscalls, or filesystem changes, also run
+`cargo xtask storage-smoke` and `cargo xtask storage-smoke --release`.
+These commands create their own disposable images; never substitute a
+host disk or a valuable image. The format and limits are in
+[docs/FILESYSTEM.md](docs/FILESYSTEM.md).
 
 ## Licensing
 

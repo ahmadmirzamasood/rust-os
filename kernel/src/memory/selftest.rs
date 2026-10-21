@@ -478,6 +478,32 @@ fn guard_pages(c: &mut Checker) {
             );
             let kept = before.saturating_sub(super::free_frames());
             c.check("stack frames returned", kept <= 3);
+            let steady = super::free_frames();
+            let mut reused = true;
+            for round in 0..1024 {
+                match super::allocate_stack(if round % 2 == 0 { 8 } else { 4 }, "churn guard") {
+                    Ok(next) => {
+                        reused &= next.guard == stack.guard;
+                        reused &= super::translate(next.guard).is_none();
+                        // SAFETY: test-owned reservation; no thread ever ran on it.
+                        reused &= unsafe { super::free_stack(next) }.is_ok();
+                    }
+                    Err(_) => {
+                        reused = false;
+                        break;
+                    }
+                }
+            }
+            c.check(
+                "1024 stack cycles reuse reservation without frame loss",
+                reused && super::free_frames() == steady,
+            );
+            c.check(
+                "invalid stack sizes rejected",
+                [0, 9, u64::MAX]
+                    .into_iter()
+                    .all(|n| super::allocate_stack(n, "invalid").is_err()),
+            );
         }
         Err(_) => {
             c.check("stack allocated", false);
@@ -823,6 +849,25 @@ fn exhaustion(c: &mut Checker) {
     // Return the chain.
     let mut returned = 0u64;
     let mut next = head;
+    // Leave fewer frames than a full stack needs, forcing rollback after
+    // some leaves were mapped. The stack tables were warmed by guard tests.
+    for _ in 0..4 {
+        let Some(frame) = frame(next) else { break };
+        // SAFETY: chain frame exclusively owned by this test.
+        next = unsafe { super::read_frame_word(frame) }.unwrap_or(0);
+        if super::free_frame(frame).is_ok() {
+            returned += 1;
+        }
+    }
+    let mut rollback = returned == 4;
+    for _ in 0..128 {
+        rollback &= super::allocate_stack(8, "oom stack").is_err();
+        rollback &= super::free_frames() == 4;
+    }
+    c.check(
+        "128 partial stack allocation failures return all frames",
+        rollback,
+    );
     while next != 0 {
         let Some(frame) = frame(next) else { break };
         // SAFETY: a frame of the chain, still owned by this test.
@@ -834,6 +879,17 @@ fn exhaustion(c: &mut Checker) {
     c.check(
         "all frames returned",
         returned == count && super::free_frames() == before,
+    );
+    let reusable = match super::allocate_stack(8, "post-oom stack") {
+        Ok(stack) => {
+            // SAFETY: test-owned stack, never installed or run.
+            unsafe { super::free_stack(stack) }.is_ok()
+        }
+        Err(_) => false,
+    };
+    c.check(
+        "stack reservation remains usable after repeated OOM",
+        reusable,
     );
     kprintln!(
         "[rust-os] memory self-test: exhaustion: {} frames ({} MiB) allocated until exhausted; \

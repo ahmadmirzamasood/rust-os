@@ -24,10 +24,12 @@
 //! [`PANIC_EXIT_CODE`]), safe wrappers for every system call, owned
 //! [`Handle`]s that close themselves, [`Channel`]s, [`Process`]es, and
 //! [`print!`]/[`println!`] to the kernel log. There is no heap, no
-//! threads, no files and no floating point.
+//! threads or floating point. [`fs`] provides bounded file access.
 
 #![no_std]
 
+pub mod display;
+pub mod fs;
 pub mod sys;
 
 use core::fmt::{self, Write};

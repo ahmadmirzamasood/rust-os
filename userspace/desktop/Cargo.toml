@@ -1,6 +1,6 @@
 [package]
 name = "desktop"
-description = "Desktop shell model (icons, launch targets). no_std; linked into the kernel as trusted code until user mode exists."
+description = "no_std desktop policy and bounded software display core used by the ring-3 display service."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,10 @@ rust-version.workspace = true
 
 [dependencies]
 os-abi.workspace = true
+gfx.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+storage.workspace = true

@@ -33,16 +33,19 @@ extern crate alloc;
 
 mod arch;
 mod display;
+mod display_device;
 mod drivers;
 mod event_loop;
 mod input_events;
 mod input_selftest;
 mod memory;
 mod panic;
+mod power;
 mod process;
 mod programs;
 mod sched;
 mod serial;
+mod storage;
 mod sync;
 mod syscall;
 mod time;
@@ -213,6 +216,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         matches!(mm_status, MemoryStatus::Ready { .. }) && arch::x86_64::interrupts_enabled(),
     );
     degraded |= !tasks.ok();
+    if tasks.ok() {
+        storage::init();
+        power::init();
+    }
 
     let (screen_w, screen_h) = display_size();
     let pipeline = Pipeline::new(screen_w, screen_h);
@@ -482,8 +489,17 @@ fn report_and_run(degraded: bool, tasks: TaskStatus, pipeline: Pipeline, ui: Opt
     #[cfg(feature = "deliberate-interrupt-fault")]
     arm_interrupt_fault();
     if tasks.processes() {
-        if let Err(err) = process::start_init(INIT_PROGRAM) {
-            process::report_start_failure(INIT_PROGRAM, err);
+        let started = if cfg!(feature = "desktop") {
+            process::start_display()
+        } else {
+            process::start_init(INIT_PROGRAM)
+        };
+        if let Err(err) = started {
+            if cfg!(feature = "desktop") {
+                kprintln!("[rust-os] display failed to start: {:?}", err);
+            } else {
+                process::report_start_failure(INIT_PROGRAM, err);
+            }
         }
     } else {
         kprintln!(
