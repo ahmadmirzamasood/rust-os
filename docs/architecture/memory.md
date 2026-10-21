@@ -98,7 +98,7 @@ the lower halves of process address spaces, which it owns completely; see
 | Offset in the slot | Use |
 | --- | --- |
 | 0 – 1 GiB | Kernel heap (grows upward) |
-| 256 GiB – 384 GiB | Kernel stacks (double-fault stack, one per thread): each is a guard page plus its pages; frames are freed when a thread is reaped, address space is never reused |
+| 256 GiB – 384 GiB | Kernel stacks (double-fault stack, one per thread): each is a guard page plus its pages; frames and bounded reservations are reused after thread reclamation |
 | 384 GiB – 512 GiB | Scratch pages for self-tests; never reused |
 
 All page-table edits go through `mm::paging::Mapper` while holding the
@@ -126,7 +126,7 @@ support will need one.
 
 `memory::allocate_stack(pages, label)` maps `pages` zeroed, writable,
 non-executable pages above an unmapped guard page and registers the guard
-under `label`. Stack address space is never reused, so the page above a stack
+under `label`. A fixed pool of 64 nine-page reservations supports 1..=8 mapped pages. Reservations are reused only after all leaves are unmapped. The page above a stack
 is the next stack's guard or unmapped. The fault report uses the guard
 registry to name the guard page a fault hit, for example "guard page below
 the boot kernel stack".
@@ -170,7 +170,7 @@ kernel's slot.
 - Bootloader-owned memory (boot page tables, boot information, boot stack,
   kernel ELF file copy) is never reclaimed.
 - The heap never returns pages; intermediate page tables are never freed;
-  stack and scratch address space is never reused.
+  stack reservations are reused; scratch address space is never reused.
 - Only 4 KiB pages are created. The physical-memory window maps everything,
   including device ranges, with default caching; it is used only for RAM
   frames and page tables.

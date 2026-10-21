@@ -34,6 +34,10 @@ pub struct Shell {
     pub selection: usize,
     pub persistent: bool,
     pub status: &'static str,
+    pub power_bits: u64,
+    pub power_confirm: Option<u64>,
+    pub unsaved_preferences: bool,
+    pub power_notice: bool,
 }
 impl Shell {
     pub fn new(preferences: Preferences, persistent: bool) -> Self {
@@ -42,12 +46,29 @@ impl Shell {
             windows: [None; 5],
             menu: false,
             selection: 0,
+            power_bits: 0,
+            power_confirm: None,
+            unsaved_preferences: false,
+            power_notice: false,
             persistent,
             status: if persistent {
                 "Persistent volume: preferences can be saved"
             } else {
                 "Temporary volume: changes last this boot"
             },
+        }
+    }
+    /// Dialog contents and failed preference saves veto exit; never discard them.
+    pub fn request_power(&mut self, action: u64, dialog_open: bool) {
+        self.menu = false;
+        self.power_confirm = None;
+        self.power_notice = true;
+        if !(1..=2).contains(&action) || self.power_bits & (1 << (action - 1)) == 0 {
+            self.status = "Unavailable: platform support or real resume drivers missing";
+        } else if dialog_open || self.unsaved_preferences {
+            self.status = "Power cancelled: close dialogs and save preferences first";
+        } else {
+            self.power_confirm = Some(action);
         }
     }
     pub fn launch(&mut self, display: &mut Display, app: usize) -> Result<(), Error> {
@@ -263,24 +284,63 @@ impl Shell {
                 .iter()
                 .chain(
                     [
-                        "Shut Down - unavailable",
-                        "Restart - unavailable",
-                        "Sleep - unavailable",
+                        if self.power_bits & 1 != 0 {
+                            "Shut Down"
+                        } else {
+                            "Shut Down - unavailable"
+                        },
+                        if self.power_bits & 2 != 0 {
+                            "Restart"
+                        } else {
+                            "Restart - unavailable"
+                        },
+                        "Sleep: resume drivers missing",
                     ]
                     .iter(),
                 )
                 .enumerate()
             {
-                let selected = self.selection == i && i < 5;
+                let enabled = i < 5
+                    || (i == 5 && self.power_bits & 1 != 0)
+                    || (i == 6 && self.power_bits & 2 != 0);
+                let selected = self.selection == i && enabled;
                 let bg = if selected {
                     Rgb::new(56, 107, 150)
                 } else {
                     panel
                 };
-                let color = if i < 5 { ink } else { Rgb::new(133, 143, 155) };
+                let color = if enabled {
+                    ink
+                } else {
+                    Rgb::new(133, 143, 155)
+                };
                 canvas.fill_rect(Rect::new(16, 48 + i as i32 * 34, 294, 30), bg);
                 canvas.draw_text(24, 55 + i as i32 * 34, title, TextStyle::Body, color, bg);
             }
+        }
+        if self.power_confirm.is_some() {
+            canvas.fill_rect(Rect::new(320, 44, 700, 82), panel);
+            canvas.draw_text(
+                332,
+                54,
+                "Exit applications and flush storage? Enter: confirm  Esc: cancel",
+                TextStyle::Body,
+                ink,
+                panel,
+            );
+            canvas.draw_text(
+                332,
+                80,
+                "RAM volume contents will be lost. Sleep is unavailable.",
+                TextStyle::Body,
+                ink,
+                panel,
+            );
+        }
+        if self.power_notice {
+            let y = canvas.height() as i32 - 64;
+            canvas.fill_rect(Rect::new(320, y, 800, 28), panel);
+            canvas.draw_text(330, y + 6, self.status, TextStyle::Body, ink, panel);
         }
     }
 }
@@ -288,6 +348,23 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn power_requires_capability_and_preserves_unsaved_work() {
+        let mut shell = Shell::new(Preferences::default(), true);
+        shell.request_power(1, false);
+        assert_eq!(shell.power_confirm, None);
+        shell.power_bits = 3;
+        shell.request_power(3, false);
+        assert_eq!(shell.power_confirm, None);
+        shell.request_power(1, true);
+        assert_eq!(shell.power_confirm, None);
+        shell.unsaved_preferences = true;
+        shell.request_power(2, false);
+        assert_eq!(shell.power_confirm, None);
+        shell.unsaved_preferences = false;
+        shell.request_power(2, false);
+        assert_eq!(shell.power_confirm, Some(2));
+    }
     #[test]
     fn preferences_reject_corrupt_or_unknown_versions() {
         for warm in [false, true] {

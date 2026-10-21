@@ -36,6 +36,8 @@ pub fn dispatch(frame: &mut ExceptionFrame) {
 fn call(number: u64, a: u64, b: u64, c: u64, d: u64) -> Result<u64, Error> {
     match number {
         nr::ABI_VERSION => Ok(u64::from(os_abi::ABI_VERSION)),
+        nr::POWER if b | c | d == 0 => process::power::call(a),
+        nr::POWER => Err(Error::InvalidArgument),
         nr::EXIT => process::exit_current(ExitStatus::Exited(a as u32 as i32)),
         nr::DEBUG_WRITE => process::debug_write(a, b),
         nr::YIELD => {
