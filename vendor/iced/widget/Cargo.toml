@@ -1,0 +1,17 @@
+[package]
+name = "iced_widget"
+version = "0.14.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Guest no_std subset port of iced_widget 0.14.0"
+
+[dependencies]
+iced_core = { path = "../core" }
+
+[lib]
+doctest = false
+
+# This vendored subset preserves upstream widget generics rather than the
+# project's Debug implementations policy. Unsafe code is forbidden in lib.rs.
+[lints]

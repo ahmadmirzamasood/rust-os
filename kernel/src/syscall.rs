@@ -49,6 +49,7 @@ fn call(number: u64, a: u64, b: u64, c: u64, d: u64) -> Result<u64, Error> {
             Ok(0)
         }
         nr::CLOCK => Ok(time::uptime_ns()),
+        nr::SYSTEM_SNAPSHOT => process::monitor::snapshot(a, b, c, d),
         nr::SPAWN => process::spawn(a, b, c),
         nr::WAIT => process::wait(a),
         nr::CLOSE => process::close(a),

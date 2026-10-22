@@ -38,17 +38,19 @@ pub const fn bounds(x: i32, y: i32) -> Rect {
 /// pixels are written, and drawing is clipped like every canvas operation.
 pub fn draw(canvas: &mut Canvas<'_>, x: i32, y: i32) {
     for (dy, row) in ARROW.iter().enumerate() {
+        let screen_y = y.saturating_add(dy as i32);
+        // Presentation may use a one-scanline canvas. Reject invisible rows
+        // before decoding their pixels instead of clipping each pixel later.
+        if screen_y < 0 || screen_y as usize >= canvas.height() {
+            continue;
+        }
         for (dx, cell) in row.bytes().enumerate() {
             let color = match cell {
                 b'#' => theme::CURSOR_OUTLINE,
                 b'.' => theme::CURSOR_FILL,
                 _ => continue,
             };
-            canvas.set_pixel(
-                x.saturating_add(dx as i32),
-                y.saturating_add(dy as i32),
-                color,
-            );
+            canvas.set_pixel(x.saturating_add(dx as i32), screen_y, color);
         }
     }
 }

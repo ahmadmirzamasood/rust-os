@@ -14,6 +14,8 @@ members = [
     "userspace/apps",
     "xtask",
     "tools/image-builder",
+    "vendor/iced/core",
+    "vendor/iced/widget",
 ]
 # Host-testable crates only. The kernel needs `--target x86_64-unknown-none`
 # and the image builder compiles the bootloader, so both are driven by xtask.
@@ -27,6 +29,8 @@ default-members = [
     "crates/storage",
     "userspace/desktop",
     "xtask",
+    "vendor/iced/core",
+    "vendor/iced/widget",
 ]
 
 [workspace.package]
@@ -45,6 +49,8 @@ input = { path = "crates/input" }
 exec = { path = "crates/exec" }
 storage = { path = "crates/storage" }
 ulib = { path = "userspace/ulib" }
+iced_core = { path = "vendor/iced/core" }
+iced_widget = { path = "vendor/iced/widget" }
 # Bitmap glyphs rasterized from Noto Sans Mono. Already compiled into the
 # bootloader's UEFI stage; only the sizes and weights we draw are enabled.
 noto-sans-mono-bitmap = { version = "=0.2.0", default-features = false, features = [

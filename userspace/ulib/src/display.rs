@@ -1,6 +1,26 @@
 //! Copy-only display device. Only the bundled display service is authorized.
 use crate::{Result, call};
 use os_abi::syscall as nr;
+pub fn system_snapshot() -> Result<os_abi::monitor::Snapshot> {
+    let mut bytes = [0; os_abi::monitor::SIZE];
+    system_snapshot_into(&mut bytes)?;
+    os_abi::monitor::Snapshot::decode(&bytes).ok_or(crate::Error::InvalidArgument)
+}
+/// Copy the versioned wire snapshot. The kernel rejects wrong buffer sizes
+/// without writing any bytes. Only the root shell may use this interface.
+pub fn system_snapshot_into(bytes: &mut [u8]) -> Result<()> {
+    let copied = call(
+        nr::SYSTEM_SNAPSHOT,
+        bytes.as_mut_ptr() as u64,
+        bytes.len() as u64,
+        0,
+        0,
+    )?;
+    if copied != os_abi::monitor::SIZE as u64 {
+        return Err(crate::Error::InvalidArgument);
+    }
+    Ok(())
+}
 /// Query (0), shutdown (1), restart (2); root shell only. Never suspends.
 pub fn power(action: u64) -> Result<u64> {
     call(nr::POWER, action, 0, 0, 0)

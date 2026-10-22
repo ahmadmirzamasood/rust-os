@@ -107,6 +107,11 @@ mod tests {
 }
 
 pub mod display;
+pub mod iced;
 pub mod shell;
 
+pub mod dock;
 pub mod files;
+pub mod launcher;
+pub mod presentation;
+pub mod workspaces;

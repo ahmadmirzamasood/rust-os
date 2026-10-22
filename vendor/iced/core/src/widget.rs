@@ -1,0 +1,122 @@
+//! Create custom widgets and operate on them.
+pub mod tree;
+
+use alloc::vec::Vec;
+pub use tree::Tree;
+
+use crate::layout::{self, Layout};
+use crate::mouse;
+use crate::renderer;
+use crate::{Event, Length, Rectangle, Shell, Size};
+
+/// A component that displays information and allows interaction.
+///
+/// If you want to build your own widgets, you will need to implement this
+/// trait.
+///
+/// # Examples
+/// The repository has some [examples] showcasing how to implement a custom
+/// widget:
+///
+/// - [`custom_widget`], a demonstration of how to build a custom widget that
+///   draws a circle.
+/// - [`geometry`], a custom widget showcasing how to draw geometry with the
+///   `Mesh2D` primitive in [`iced_wgpu`].
+///
+/// [examples]: https://github.com/iced-rs/iced/tree/0.14/examples
+/// [`custom_widget`]: https://github.com/iced-rs/iced/tree/0.14/examples/custom_widget
+/// [`geometry`]: https://github.com/iced-rs/iced/tree/0.14/examples/geometry
+/// [`iced_wgpu`]: https://github.com/iced-rs/iced/tree/0.14/wgpu
+// Preserve upstream widget method signatures while omitting host facilities.
+#[allow(clippy::too_many_arguments)]
+pub trait Widget<Message, Theme, Renderer>
+where
+    Renderer: crate::Renderer,
+{
+    /// Returns the [`Size`] of the [`Widget`] in lengths.
+    fn size(&self) -> Size<Length>;
+
+    /// Returns a [`Size`] hint for laying out the [`Widget`].
+    ///
+    /// This hint may be used by some widget containers to adjust their sizing strategy
+    /// during construction.
+    fn size_hint(&self) -> Size<Length> {
+        self.size()
+    }
+
+    /// Returns the [`layout::Node`] of the [`Widget`].
+    ///
+    /// This [`layout::Node`] is used by the runtime to compute the [`Layout`] of the
+    /// user interface.
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node;
+
+    /// Draws the [`Widget`] using the associated `Renderer`.
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    );
+
+    /// Returns the [`Tag`] of the [`Widget`].
+    ///
+    /// [`Tag`]: tree::Tag
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::stateless()
+    }
+
+    /// Returns the [`State`] of the [`Widget`].
+    ///
+    /// [`State`]: tree::State
+    fn state(&self) -> tree::State {
+        tree::State::None
+    }
+
+    /// Returns the state [`Tree`] of the children of the [`Widget`].
+    fn children(&self) -> Vec<Tree> {
+        Vec::new()
+    }
+
+    /// Reconciles the [`Widget`] with the provided [`Tree`].
+    fn diff(&self, tree: &mut Tree) {
+        tree.children.clear();
+    }
+
+    /// Processes a runtime [`Event`].
+    ///
+    /// By default, it does nothing.
+    fn update(
+        &mut self,
+        _tree: &mut Tree,
+        _event: &Event,
+        _layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _renderer: &Renderer,
+        _shell: &mut Shell<'_, Message>,
+        _viewport: &Rectangle,
+    ) {
+    }
+
+    /// Returns the current [`mouse::Interaction`] of the [`Widget`].
+    ///
+    /// By default, it returns [`mouse::Interaction::None`].
+    fn mouse_interaction(
+        &self,
+        _tree: &Tree,
+        _layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+        _renderer: &Renderer,
+    ) -> mouse::Interaction {
+        mouse::Interaction::None
+    }
+}

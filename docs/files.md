@@ -100,7 +100,7 @@ The storage contract remains 64 non-root entries, 4096 bytes per file and
 120 bytes per absolute path. Directories and Trash records consume entries.
 An 8 KiB listing buffer holds the maximum directory; all entries are selectable
 through three-row pages. Tree planning is bounded to 64 nodes and checks path
-expansion before copying/trashing. The shell retains its bounded 8 MiB arena
+expansion before copying/trashing. The shell retains its bounded 12 MiB arena
 and original fixed surfaces. These limits are intentionally small; this is not
 a general-purpose file manager.
 

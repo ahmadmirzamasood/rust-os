@@ -1506,6 +1506,54 @@ fn shell_run_inner(options: &crate::Options, files: bool) -> Result<(), String> 
             Ok(im)
         };
         if boot == 1 {
+            // Cursor-only frames must preserve the retained desktop exactly,
+            // including every pixel at all previous cursor positions.
+            move_pointer(&mut vm, -2000, -2000)?;
+            move_pointer(&mut vm, 700, 400)?;
+            let before = snap(&mut vm, "cursor-before")?;
+            let from = watch.read().len();
+            for step in 0..120 {
+                move_pointer(&mut vm, if step % 2 == 0 { 8 } else { -8 }, 0)?;
+            }
+            watch.wait(
+                "cursor-only rendering telemetry",
+                Duration::from_secs(10),
+                |l| {
+                    l[from..].lines().any(|line| {
+                        line.contains("SHELL RENDER ")
+                            && line.split_whitespace().any(|field| {
+                                field
+                                    .strip_prefix("cursor_frames=")
+                                    .and_then(|v| v.parse::<u64>().ok())
+                                    .is_some_and(|n| n >= 10)
+                            })
+                    })
+                },
+            )?;
+            let after = snap(&mut vm, "cursor-after")?;
+            for y in 40..before.height {
+                for x in 0..before.width {
+                    if before.pixel(x, y) != after.pixel(x, y) {
+                        return Err(format!("cursor sweep left damaged pixels at {x},{y}"));
+                    }
+                }
+            }
+            for line in watch.read()[from..]
+                .lines()
+                .filter(|l| l.contains("SHELL RENDER "))
+            {
+                println!("{line}");
+            }
+            tap(&mut vm, "f4")?;
+            watch.wait("reduced motion toggle", Duration::from_secs(10), |l| {
+                l.contains("SHELL REDUCED MOTION true")
+            })?;
+            tap(&mut vm, "f4")?;
+            watch.wait("motion restored", Duration::from_secs(10), |l| {
+                l.contains("SHELL REDUCED MOTION false")
+            })?;
+        }
+        if boot == 1 {
             // Keyboard launcher: open all built-in applications, leave Settings focused.
             let apps: &[usize] = if files { &[0, 1, 2, 4, 3] } else { &[3] };
             for &app in apps {
@@ -1528,9 +1576,11 @@ fn shell_run_inner(options: &crate::Options, files: bool) -> Result<(), String> 
             if im.pixel(280, 250) != Some([238, 242, 246]) {
                 return Err("Settings content pixels absent".into());
             }
+            shell_iced_checks(&mut vm, &mut watch, &dir)?;
+            let preference_from = watch.read().len();
             tap(&mut vm, "ret")?;
             watch.wait("preference synced", Duration::from_secs(60), |l| {
-                l.contains("SHELL PREFERENCE true Ok")
+                l[preference_from..].contains("SHELL PREFERENCE true Ok")
             })?;
             let im = loop {
                 let im = snap(&mut vm, "saved")?;
@@ -1576,6 +1626,9 @@ fn shell_run_inner(options: &crate::Options, files: bool) -> Result<(), String> 
                 return Err("saved accent missing after reboot".into());
             }
         }
+        if boot == 1 {
+            shell_desktop_checks(&mut vm, &mut watch, &dir)?;
+        }
         if files {
             shell_file_checks(&mut vm, &mut watch, boot, &dir)?;
         }
@@ -1592,7 +1645,7 @@ fn shell_run_inner(options: &crate::Options, files: bool) -> Result<(), String> 
         // Reset menu selection with Esc twice (close then reopen).
         tap(&mut vm, "esc")?;
         tap(&mut vm, "esc")?;
-        for _ in 0..6 {
+        for _ in 0..desktop::shell::APPS.len() + 1 {
             tap(&mut vm, "down")?;
         }
         let confirm_from = watch.read().len();
@@ -1610,7 +1663,7 @@ fn shell_run_inner(options: &crate::Options, files: bool) -> Result<(), String> 
             return Err("cancelled request issued a hardware transition".into());
         }
         tap(&mut vm, "esc")?;
-        for _ in 0..6 {
+        for _ in 0..desktop::shell::APPS.len() + 1 {
             tap(&mut vm, "down")?;
         }
         tap(&mut vm, "ret")?;
@@ -1626,7 +1679,7 @@ fn shell_run_inner(options: &crate::Options, files: bool) -> Result<(), String> 
             },
         )?;
         tap(&mut vm, "esc")?;
-        for _ in 0..5 {
+        for _ in 0..desktop::shell::APPS.len() {
             tap(&mut vm, "down")?;
         }
         tap(&mut vm, "ret")?;
@@ -1663,7 +1716,560 @@ fn shell_run_inner(options: &crate::Options, files: bool) -> Result<(), String> 
     Ok(())
 }
 
+/// Exercise the ported iced controls in the actual guest, including the frame
+/// between pointer-down and release. Leave the accent and motion unchanged and
+/// keyboard selection on accent for the existing persistence checks.
+fn shell_iced_checks(vm: &mut Vm, watch: &mut Watcher, dir: &Path) -> Result<(), String> {
+    fn move_to(vm: &mut Vm, x: i64, y: i64) -> Result<(), String> {
+        move_pointer(vm, -2000, -2000)?;
+        move_pointer(vm, x, y)
+    }
+    fn presented(watch: &mut Watcher, from: usize, action: &str) -> Result<(), String> {
+        watch.wait("iced input presented", Duration::from_secs(30), |log| {
+            let Some(at) = log[from..].find(action) else {
+                return false;
+            };
+            log[from + at + action.len()..].contains("SHELL INPUT PRESENTED workspace=0 menu=false")
+        })?;
+        Ok(())
+    }
+    fn capture_until(
+        vm: &mut Vm,
+        dir: &Path,
+        name: &str,
+        expected: impl Fn(&RgbImage) -> bool,
+    ) -> Result<(), String> {
+        let end = Instant::now() + Duration::from_secs(20);
+        loop {
+            let image = vm.screendump(&dir.join(format!("iced-{name}.ppm")))?;
+            picture::save_png(&image, &dir.join(format!("iced-{name}.png")))?;
+            if expected(&image) {
+                return Ok(());
+            }
+            if Instant::now() >= end {
+                return Err(format!("iced Settings pixels never matched {name}"));
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    }
+    fn tap(vm: &mut Vm, watch: &mut Watcher, key: &str, action: &str) -> Result<(), String> {
+        let from = watch.read().len();
+        send_events(vm, &[key_event(key, true), key_event(key, false)])?;
+        presented(watch, from, action)
+    }
+    fn click_motion(vm: &mut Vm, watch: &mut Watcher, action: &str) -> Result<(), String> {
+        move_to(vm, 314, 344)?;
+        let from = watch.read().len();
+        send_events(vm, &[button_event("left", true)])?;
+        presented(watch, from, "")?;
+        let from = watch.read().len();
+        send_events(vm, &[button_event("left", false)])?;
+        presented(watch, from, action)
+    }
+
+    // Settings is cascaded at (274,214), with a 24-pixel title bar. These
+    // samples are inside the computed button quads, away from text and cursor.
+    const ACTIVE: [u8; 3] = [224, 232, 242];
+    const HOVER: [u8; 3] = [204, 219, 237];
+    const COOL: [u8; 3] = [43, 97, 166];
+    const WARM: [u8; 3] = [156, 66, 89];
+    let preference_start = watch.read().len();
+    move_to(vm, 314, 298)?;
+    capture_until(vm, dir, "hover", |im| {
+        im.pixel(700, 298) == Some(HOVER) && im.pixel(700, 344) == Some(ACTIVE)
+    })?;
+
+    let from = watch.read().len();
+    send_events(vm, &[button_event("left", true)])?;
+    presented(watch, from, "")?;
+    capture_until(vm, dir, "accent-pressed", |im| {
+        im.pixel(700, 298) == Some(COOL) && im.pixel(1200, 400) == Some([29, 38, 59])
+    })?;
+    if watch.read()[preference_start..].contains("SHELL PREFERENCE ") {
+        return Err("iced accent activated before pointer release".into());
+    }
+    let from = watch.read().len();
+    send_events(vm, &[button_event("left", false)])?;
+    presented(watch, from, "SHELL PREFERENCE true Ok")?;
+    capture_until(vm, dir, "accent-released", |im| {
+        im.pixel(700, 298) == Some(HOVER) && im.pixel(1200, 400) == Some([65, 42, 52])
+    })?;
+    if watch.read()[preference_start..]
+        .matches("SHELL PREFERENCE ")
+        .count()
+        != 1
+    {
+        return Err("iced accent release did not publish exactly one preference change".into());
+    }
+
+    let from = watch.read().len();
+    send_events(vm, &[button_event("left", true)])?;
+    presented(watch, from, "")?;
+    capture_until(vm, dir, "warm-pressed", |im| {
+        im.pixel(700, 298) == Some(WARM)
+    })?;
+    let from = watch.read().len();
+    send_events(vm, &[button_event("left", false)])?;
+    presented(watch, from, "SHELL PREFERENCE false Ok")?;
+    capture_until(vm, dir, "accent-restored", |im| {
+        im.pixel(700, 298) == Some(HOVER) && im.pixel(1200, 400) == Some([29, 38, 59])
+    })?;
+    if watch.read()[preference_start..]
+        .matches("SHELL PREFERENCE ")
+        .count()
+        != 2
+    {
+        return Err(
+            "second iced accent click did not publish exactly one preference change".into(),
+        );
+    }
+
+    let cancelled_from = watch.read().len();
+    send_events(vm, &[button_event("left", true)])?;
+    presented(watch, cancelled_from, "")?;
+    capture_until(vm, dir, "cancel-pressed", |im| {
+        im.pixel(700, 298) == Some(COOL)
+    })?;
+    // Move directly out of the window while held, then release on the desktop.
+    move_pointer(vm, 1000 - 314, 600 - 298)?;
+    let from = watch.read().len();
+    send_events(vm, &[button_event("left", false)])?;
+    presented(watch, from, "")?;
+    capture_until(vm, dir, "outside-release", |im| {
+        im.pixel(700, 298) == Some(ACTIVE) && im.pixel(1200, 400) == Some([29, 38, 59])
+    })?;
+    if watch.read()[cancelled_from..].contains("SHELL PREFERENCE ") {
+        return Err("cancelled iced pointer press changed the preference".into());
+    }
+
+    let motion_from = watch.read().len();
+    click_motion(vm, watch, "SHELL ICED MOTION true")?;
+    click_motion(vm, watch, "SHELL ICED MOTION false")?;
+    move_to(vm, 1000, 600)?;
+    // Pointer activation focuses Motion; explicitly navigate away and back.
+    tap(vm, watch, "up", "")?;
+    tap(vm, watch, "down", "")?;
+    capture_until(vm, dir, "keyboard-selection", |im| {
+        im.pixel(291, 344) == Some(COOL) && im.pixel(700, 344) == Some(ACTIVE)
+    })?;
+    tap(vm, watch, "ret", "SHELL ICED MOTION true")?;
+    tap(vm, watch, "spc", "SHELL ICED MOTION false")?;
+    tap(vm, watch, "up", "")?;
+    capture_until(vm, dir, "controls-restored", |im| {
+        im.pixel(291, 298) == Some(COOL)
+            && im.pixel(700, 298) == Some(ACTIVE)
+            && im.pixel(1200, 400) == Some([29, 38, 59])
+    })?;
+    let log = watch.read();
+    if log[motion_from..].matches("SHELL ICED MOTION ").count() != 4
+        || log[cancelled_from..].contains("SHELL PREFERENCE ")
+    {
+        return Err("iced motion/keyboard controls published unexpected state changes".into());
+    }
+    println!(
+        "iced Settings PASS: hover/pressed pixels, release-only accent changes, outside cancellation, pointer and keyboard motion controls"
+    );
+    Ok(())
+}
+
 // Exercise real shell controls, then verify exact persisted bytes independently.
+fn shell_desktop_checks(vm: &mut Vm, watch: &mut Watcher, dir: &Path) -> Result<(), String> {
+    fn tap(vm: &mut Vm, key: &str) -> Result<(), String> {
+        send_events(vm, &[key_event(key, true), key_event(key, false)])?;
+        std::thread::sleep(Duration::from_millis(220));
+        Ok(())
+    }
+    fn click(vm: &mut Vm) -> Result<(), String> {
+        send_events(vm, &[button_event("left", true)])?;
+        std::thread::sleep(Duration::from_millis(100));
+        send_events(vm, &[button_event("left", false)])?;
+        std::thread::sleep(Duration::from_millis(220));
+        Ok(())
+    }
+    fn dock(vm: &mut Vm, app: usize) -> Result<(), String> {
+        let r = desktop::dock::item(1280, 800, app);
+        move_pointer(vm, -2000, -2000)?;
+        move_pointer(vm, i64::from(r.x + 38), i64::from(r.y + 30))?;
+        click(vm)
+    }
+    fn screen(
+        vm: &mut Vm,
+        dir: &Path,
+        name: &str,
+        pixel: (usize, usize),
+        color: [u8; 3],
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            std::thread::sleep(Duration::from_millis(300));
+            let im = vm.screendump(&dir.join(format!("desktop-{name}.ppm")))?;
+            if im.pixel(pixel.0, pixel.1) == Some(color) {
+                picture::save_png(&im, &dir.join(format!("desktop-{name}.png")))?;
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("desktop {name} pixels absent"));
+            }
+        }
+    }
+    dock(vm, 0)?;
+    let from = watch.read().len();
+    dock(vm, desktop::shell::TASK_MANAGER)?;
+    watch.wait("dock task manager launch", Duration::from_secs(30), |l| {
+        l[from..].contains("SHELL LAUNCH 5") && l[from..].contains("SHELL DOCK 5")
+    })?;
+    watch.wait("real process telemetry", Duration::from_secs(10), |l| {
+        l.contains("SHELL MONITOR processes=1 threads=")
+    })?;
+    screen(vm, dir, "tasks", (760, 294), [60, 100, 150])?;
+    tap(vm, "p")?;
+    watch.wait("process view", Duration::from_secs(10), |l| {
+        l[from..].contains("processes=true")
+    })?;
+    screen(vm, dir, "processes", (760, 294), [60, 100, 150])?;
+    tap(vm, "p")?;
+    // Select Computer, cancel a close, then confirm and relaunch from its dock.
+    tap(vm, "delete")?;
+    watch.wait("task close confirmation", Duration::from_secs(10), |l| {
+        l[from..].contains("confirm=true")
+    })?;
+    tap(vm, "esc")?;
+    let cancelled = watch.read().len();
+    tap(vm, "delete")?;
+    tap(vm, "ret")?;
+    dock(vm, 0)?;
+    watch.wait(
+        "task closed and dock relaunched",
+        Duration::from_secs(15),
+        |l| l[cancelled..].contains("SHELL LAUNCH 0"),
+    )?;
+    dock(vm, desktop::shell::TASK_MANAGER)?;
+    tap(vm, "f6")?;
+    screen(vm, dir, "maximize", (1000, 50), [60, 100, 150])?;
+    tap(vm, "f6")?;
+    screen(vm, dir, "restore", (760, 294), [60, 100, 150])?;
+    tap(vm, "f7")?;
+    screen(vm, dir, "tile-left", (500, 50), [60, 100, 150])?;
+    tap(vm, "f8")?;
+    screen(vm, dir, "tile-right", (1000, 50), [60, 100, 150])?;
+    let cascade_from = watch.read().len();
+    tap(vm, "f9")?;
+    watch.wait("desktop cascade", Duration::from_secs(15), |l| {
+        l[cascade_from..].contains("SHELL CASCADE")
+    })?;
+    move_pointer(vm, -2000, -2000)?;
+    move_pointer(vm, 824, 544)?;
+    let resize_from = watch.read().len();
+    send_events(vm, &[button_event("left", true)])?;
+    std::thread::sleep(Duration::from_millis(120));
+    move_pointer(vm, 80, 40)?;
+    send_events(vm, &[button_event("left", false)])?;
+    watch.wait("desktop mouse resize", Duration::from_secs(15), |l| {
+        l[resize_from..].contains("SHELL RESIZE ")
+    })?;
+    screen(vm, dir, "resize", (880, 570), [238, 242, 246])?;
+    tap(vm, "f9")?;
+    let close_from = watch.read().len();
+    tap(vm, "f3")?;
+    watch.wait("desktop task manager close", Duration::from_secs(15), |l| {
+        l[close_from..].contains("SHELL CLOSE ")
+    })?;
+    if watch.read()[from..].contains(markers::STALL_BEGIN) {
+        return Err("desktop input triggered a kernel diagnostic action".into());
+    }
+    shell_workflow_checks(vm, watch, dir)?;
+    println!(
+        "desktop controls PASS: pinned dock, task confirmation/relaunch, real telemetry, maximize/restore, left/right tiling and mouse resize"
+    );
+    Ok(())
+}
+
+/// Exercise the launcher and workspace policy through actual guest input. The
+/// retained workspace-zero scene provides an exact reference for hidden windows.
+fn shell_workflow_checks(vm: &mut Vm, watch: &mut Watcher, dir: &Path) -> Result<(), String> {
+    fn tap(vm: &mut Vm, key: &str) -> Result<(), String> {
+        send_events(vm, &[key_event(key, true), key_event(key, false)])?;
+        std::thread::sleep(Duration::from_millis(220));
+        Ok(())
+    }
+    fn click_at(vm: &mut Vm, x: i32, y: i32) -> Result<(), String> {
+        move_pointer(vm, -2000, -2000)?;
+        move_pointer(vm, i64::from(x), i64::from(y))?;
+        send_events(vm, &[button_event("left", true)])?;
+        std::thread::sleep(Duration::from_millis(100));
+        send_events(vm, &[button_event("left", false)])?;
+        std::thread::sleep(Duration::from_millis(220));
+        Ok(())
+    }
+    fn capture(vm: &mut Vm, dir: &Path, name: &str) -> Result<RgbImage, String> {
+        std::thread::sleep(Duration::from_millis(500));
+        let im = vm.screendump(&dir.join(format!("workflow-{name}.ppm")))?;
+        picture::save_png(&im, &dir.join(format!("workflow-{name}.png")))?;
+        Ok(im)
+    }
+    // Input acknowledgements precede composition and scanline presentation.
+    // Wait for the expected scene, including on slow debug VM builds.
+    fn capture_until(
+        vm: &mut Vm,
+        dir: &Path,
+        name: &str,
+        failure: &str,
+        expected: impl Fn(&RgbImage) -> bool,
+    ) -> Result<RgbImage, String> {
+        let end = Instant::now() + Duration::from_secs(15);
+        loop {
+            let im = capture(vm, dir, name)?;
+            if expected(&im) {
+                return Ok(im);
+            }
+            if Instant::now() >= end {
+                return Err(failure.into());
+            }
+        }
+    }
+    fn workspace_screen(
+        vm: &mut Vm,
+        dir: &Path,
+        name: &str,
+        workspace: usize,
+    ) -> Result<RgbImage, String> {
+        let end = Instant::now() + Duration::from_secs(15);
+        loop {
+            let im = capture(vm, dir, name)?;
+            let r = desktop::workspaces::item(im.width as u32, im.height as u32, workspace);
+            let active = desktop::workspaces::ACTIVE;
+            if im.pixel((r.x + 3) as usize, (r.y + 3) as usize)
+                == Some([active.r, active.g, active.b])
+            {
+                return Ok(im);
+            }
+            if Instant::now() >= end {
+                return Err(format!("workspace {workspace} indicator absent in {name}"));
+            }
+        }
+    }
+    fn same_region(a: &RgbImage, b: &RgbImage, bottom_margin: usize) -> bool {
+        a.width == b.width
+            && a.height == b.height
+            && (40..a.height.saturating_sub(bottom_margin))
+                .all(|y| (0..a.width).all(|x| a.pixel(x, y) == b.pixel(x, y)))
+    }
+    fn await_presented(
+        watch: &mut Watcher,
+        from: usize,
+        action: &str,
+        state: &str,
+    ) -> Result<(), String> {
+        watch.wait("input scene presented", Duration::from_secs(30), |l| {
+            let Some(action_at) = l[from..].find(action) else {
+                return false;
+            };
+            l[from + action_at + action.len()..].contains(&format!("SHELL INPUT PRESENTED {state}"))
+        })?;
+        Ok(())
+    }
+    fn search_about(vm: &mut Vm, watch: &mut Watcher) -> Result<(), String> {
+        let from = watch.read().len();
+        tap(vm, "meta_l")?;
+        for key in ["a", "b", "o", "u", "t"] {
+            tap(vm, key)?;
+        }
+        watch.wait("launcher query", Duration::from_secs(15), |l| {
+            l[from..].contains("SHELL SEARCH length=5 results=1")
+        })?;
+        await_presented(
+            watch,
+            from,
+            "SHELL SEARCH length=5 results=1",
+            "workspace=0 menu=true query_len=5",
+        )?;
+        Ok(())
+    }
+    fn workspace_key(
+        vm: &mut Vm,
+        watch: &mut Watcher,
+        key: &str,
+        target: usize,
+        moved: bool,
+    ) -> Result<(), String> {
+        let from = watch.read().len();
+        tap(vm, key)?;
+        watch.wait("workspace keyboard action", Duration::from_secs(15), |l| {
+            l[from..].contains(&format!("SHELL WORKSPACE {target} moved={moved}"))
+        })?;
+        await_presented(
+            watch,
+            from,
+            &format!("SHELL WORKSPACE {target} moved={moved}"),
+            &format!("workspace={target} menu=false"),
+        )?;
+        Ok(())
+    }
+
+    // The preceding checks may have left About open. Give it focus, close it,
+    // then retain the other applications as our workspace-zero reference.
+    tap(vm, "f9")?;
+    tap(vm, "esc")?;
+    for _ in 0..4 {
+        tap(vm, "down")?;
+    }
+    let from = watch.read().len();
+    tap(vm, "ret")?;
+    watch.wait(
+        "About focus before workflow",
+        Duration::from_secs(15),
+        |l| l[from..].contains("SHELL LAUNCH 4"),
+    )?;
+    let from = watch.read().len();
+    tap(vm, "f3")?;
+    watch.wait(
+        "About close before workflow",
+        Duration::from_secs(15),
+        |l| l[from..].contains("SHELL CLOSE "),
+    )?;
+    await_presented(watch, from, "SHELL CLOSE ", "workspace=0 menu=false")?;
+    // Keep the cursor and hover changes outside the comparison region.
+    let from = watch.read().len();
+    move_pointer(vm, -2000, -2000)?;
+    move_pointer(vm, 1200, 16)?;
+    tap(vm, "shift")?; // Harmless key acknowledges the final pointer scene.
+    await_presented(watch, from, "", "workspace=0 menu=false")?;
+    let baseline = workspace_screen(vm, dir, "baseline", 0)?;
+
+    search_about(vm, watch)?;
+    capture(vm, dir, "launcher-filtered")?;
+    let from = watch.read().len();
+    tap(vm, "esc")?;
+    watch.wait("launcher query cleared", Duration::from_secs(15), |l| {
+        l[from..].contains("SHELL SEARCH length=0 results=9")
+    })?;
+    await_presented(
+        watch,
+        from,
+        "SHELL SEARCH length=0 results=9",
+        "workspace=0 menu=true query_len=0",
+    )?;
+    capture(vm, dir, "launcher-cleared")?;
+    let from = watch.read().len();
+    tap(vm, "esc")?;
+    await_presented(watch, from, "", "workspace=0 menu=false query_len=0")?;
+    capture_until(
+        vm,
+        dir,
+        "launcher-dismissed",
+        "Escape did not dismiss the cleared launcher cleanly",
+        |im| same_region(&baseline, im, 0),
+    )?;
+    search_about(vm, watch)?;
+    let from = watch.read().len();
+    tap(vm, "ret")?;
+    watch.wait("filtered About launch", Duration::from_secs(15), |l| {
+        l[from..].contains("SHELL LAUNCH 4")
+    })?;
+    await_presented(watch, from, "SHELL LAUNCH 4", "workspace=0 menu=false")?;
+    workspace_key(vm, watch, "f12", 1, true)?;
+    let moved = workspace_screen(vm, dir, "moved-about", 1)?;
+    workspace_key(vm, watch, "f10", 0, false)?;
+    workspace_screen(vm, dir, "about-hidden", 0)?;
+    // The global dock correctly gains About's running indicator; compare the
+    // desktop work area so that indicator cannot mask a leaked window.
+    capture_until(
+        vm,
+        dir,
+        "about-hidden",
+        "moving About changed the retained workspace-zero scene",
+        |im| same_region(&baseline, im, 96),
+    )?;
+    workspace_key(vm, watch, "f11", 1, false)?;
+    workspace_screen(vm, dir, "about-restored", 1)?;
+    capture_until(
+        vm,
+        dir,
+        "about-restored",
+        "returning to the workspace did not restore About and focus",
+        |im| same_region(&moved, im, 0),
+    )?;
+
+    let r = desktop::dock::item(moved.width as u32, moved.height as u32, 4);
+    let from = watch.read().len();
+    click_at(vm, r.x + 38, r.y + 30)?;
+    watch.wait("workspace dock minimize", Duration::from_secs(15), |l| {
+        l[from..].contains("SHELL DOCK 4")
+    })?;
+    await_presented(watch, from, "SHELL DOCK 4", "workspace=1 menu=false")?;
+    workspace_screen(vm, dir, "about-minimized", 1)?;
+    let minimized = capture_until(
+        vm,
+        dir,
+        "about-minimized",
+        "focused dock activation did not minimize About",
+        |im| !same_region(&moved, im, 96),
+    )?;
+    let from = watch.read().len();
+    click_at(vm, r.x + 38, r.y + 30)?;
+    watch.wait("workspace dock restore", Duration::from_secs(15), |l| {
+        l[from..].contains("SHELL DOCK 4")
+    })?;
+    await_presented(watch, from, "SHELL DOCK 4", "workspace=1 menu=false")?;
+    workspace_screen(vm, dir, "dock-restored", 1)?;
+    capture_until(
+        vm,
+        dir,
+        "dock-restored",
+        "dock restore did not recover About's workspace scene",
+        |im| same_region(&moved, im, 96),
+    )?;
+    let from = watch.read().len();
+    tap(vm, "f3")?;
+    watch.wait("workspace About close", Duration::from_secs(15), |l| {
+        l[from..].contains("SHELL CLOSE ")
+    })?;
+    await_presented(watch, from, "SHELL CLOSE ", "workspace=1 menu=false")?;
+    workspace_screen(vm, dir, "about-closed", 1)?;
+    capture_until(
+        vm,
+        dir,
+        "about-closed",
+        "closed workspace app left visible window pixels",
+        |im| same_region(&minimized, im, 96),
+    )?;
+
+    let r = desktop::workspaces::item(moved.width as u32, moved.height as u32, 3);
+    let from = watch.read().len();
+    click_at(vm, r.x + 20, r.y + 14)?;
+    watch.wait("mouse workspace switch", Duration::from_secs(15), |l| {
+        l[from..].contains("SHELL WORKSPACE 3 moved=false")
+    })?;
+    await_presented(
+        watch,
+        from,
+        "SHELL WORKSPACE 3 moved=false",
+        "workspace=3 menu=false",
+    )?;
+    workspace_screen(vm, dir, "mouse-workspace", 3)?;
+    workspace_key(vm, watch, "f11", 0, false)?;
+    workspace_screen(vm, dir, "workspace-wrap-next", 0)?;
+    workspace_key(vm, watch, "f10", 3, false)?;
+    workspace_screen(vm, dir, "workspace-wrap-previous", 3)?;
+    let r = desktop::workspaces::item(moved.width as u32, moved.height as u32, 0);
+    let from = watch.read().len();
+    click_at(vm, r.x + 20, r.y + 14)?;
+    watch.wait("mouse workspace return", Duration::from_secs(15), |l| {
+        l[from..].contains("SHELL WORKSPACE 0 moved=false")
+    })?;
+    await_presented(
+        watch,
+        from,
+        "SHELL WORKSPACE 0 moved=false",
+        "workspace=0 menu=false",
+    )?;
+    workspace_screen(vm, dir, "workspace-return", 0)?;
+    println!(
+        "desktop workflow PASS: Meta launcher, live search and Escape, workspace move/follow, hidden scene preservation, dock restore, mouse switching and wraparound"
+    );
+    Ok(())
+}
+
 fn shell_file_checks(
     vm: &mut Vm,
     watch: &mut Watcher,

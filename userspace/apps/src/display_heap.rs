@@ -31,7 +31,7 @@ unsafe impl GlobalAlloc for Heap {
 }
 #[global_allocator]
 static HEAP: Heap = Heap(UnsafeCell::new(FreeListHeap::new()));
-const SIZE: usize = 8 * 1024 * 1024;
+const SIZE: usize = 12 * 1024 * 1024;
 #[repr(align(16))]
 struct Arena([u8; SIZE]);
 static mut ARENA: Arena = Arena([0; SIZE]);
