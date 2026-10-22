@@ -70,6 +70,11 @@ fn main() -> i32 {
 }
 
 fn numbers(c: &mut Checks) {
+    c.expect_err(
+        "monitor restricted",
+        raw(nr::SYSTEM_SNAPSHOT, 0, os_abi::monitor::SIZE as u64, 0, 0),
+        Error::UnknownSyscall,
+    );
     c.expect_err("call 999", raw(999, 0, 0, 0, 0), Error::UnknownSyscall);
     c.expect_err(
         "call COUNT",

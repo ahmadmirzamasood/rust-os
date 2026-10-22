@@ -6,35 +6,20 @@ A **modular monolithic kernel** for x86_64. Subsystems are separate Rust
 modules and crates with one-way dependencies running in ring 0. User
 programs run as isolated processes in ring 3, each in its own address
 space, and talk to the kernel only through the versioned system-call
-interface in `os-abi` (see [processes.md](processes.md)). The desktop model
-is still linked into the kernel; it is written against `os-abi` so it can
-move into a process later.
+interface in `os-abi` (see [processes.md](processes.md)). The interactive desktop runs as a trusted ring-3 shell process. Its Rust
+window manager, dock and task controls use the host-tested `desktop` crate;
+the kernel exposes only validated device, storage, power and read-only
+monitoring calls. See [desktop environment](../desktop-environment.md).
 
-```text
-UEFI firmware (OVMF, external)
-  └─ bootloader 0.11 UEFI stage (third-party Rust)
-       └─ kernel                                   kernel/
-            ├─ arch: port I/O, CPU tables, exceptions, kernel/src/arch/x86_64/
-            │        8259 PIC, PIT, IRQ dispatch
-            ├─ boot info: validate, copy memory map   crates/boot-data/ + kernel/src/main.rs
-            ├─ memory: frames, mapping, stacks, heap  crates/mm/ + kernel/src/memory/
-            ├─ drivers: 16550 serial (COM1)           kernel/src/serial.rs
-            │           PS/2 keyboard + mouse, ATA PIO kernel/src/drivers/
-            ├─ time: tick counter, TSC clock          kernel/src/time.rs
-            ├─ input: rings, decoders, pointer        crates/input/ + kernel/src/input_events.rs
-            ├─ event loop + input-debug screen        kernel/src/event_loop.rs, kernel/src/ui.rs
-            │  (the `ui` thread)
-            ├─ graphics: framebuffer, drawing, text   crates/gfx/ + kernel/src/display.rs
-            ├─ threads: scheduler, context switch     kernel/src/sched/, arch/x86_64/switch.rs
-            ├─ processes: address spaces, loader,     kernel/src/process/, memory/user.rs,
-            │  handles, channels, system calls          syscall.rs, programs.rs, crates/exec/
-            ├─ vfs + RAM/RSFS1 filesystems             crates/storage/, kernel/src/storage.rs
-            ├─ power: shutdown, restart               (planned)
-            └─ trusted modules (linked in for now)
-                 └─ desktop model                     userspace/desktop/
-  ── ring 3 ── int 0x80 ── os-abi interface ───────── crates/os-abi/
-       user processes (static ELF, boot bundle)    userspace/apps/ on userspace/ulib/
-```
+| Layer | Components |
+| --- | --- |
+| External boot | UEFI firmware and the Rust bootloader UEFI stage |
+| Kernel architecture | CPU tables, faults, IRQs, PIC/PIT, context switching |
+| Kernel services | Validated boot data, memory, scheduler, process/ELF/handles/channels/syscalls, VFS, device drivers and Q35 power |
+| Device boundary | RGB row copies, bounded input queue, file calls, power requests and read-only system snapshots |
+| Ring-3 desktop | Shell, window manager/compositor, dock, Task Manager and built-in Files/Trash/Settings/About views |
+| User support | `os-abi`, `ulib` and static ELF programs from the boot bundle |
+
 
 Rules that keep the later split possible:
 
@@ -79,8 +64,8 @@ user programs with `--target x86_64-unknown-none`.
    arguments and user pointers, handle-based access, fault containment
    (see [processes.md](processes.md)). Programs come only from the boot
    bundle built with the OS.
-2. Next: move the desktop and Files out of the kernel into processes; add
-   the calls they need (drawing surfaces, input events, files).
+2. Done: the desktop and Files run in the ring-3 shell using drawing, input
+   and file calls. Next: split built-in views into independent processes.
 3. Only after more hardening (resource limits, a security review, more
    adversarial testing) may untrusted programs run.
 

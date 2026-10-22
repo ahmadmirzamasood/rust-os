@@ -10,6 +10,8 @@ rust-version.workspace = true
 [dependencies]
 os-abi.workspace = true
 gfx.workspace = true
+iced_core.workspace = true
+iced_widget.workspace = true
 
 [lints]
 workspace = true

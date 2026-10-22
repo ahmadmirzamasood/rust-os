@@ -17,6 +17,7 @@
 
 #![no_std]
 #![forbid(unsafe_code)]
+pub mod monitor;
 
 /// Version of this interface. Bump on any incompatible change.
 ///
@@ -78,7 +79,9 @@ pub mod syscall {
     pub const CHANNEL_RECV: u64 = 11;
 
     /// Number of defined calls (numbers are `0..COUNT`).
-    pub const COUNT: u64 = 27;
+    pub const COUNT: u64 = 28;
+    /// `(out_ptr, monitor::SIZE, 0, 0) -> SIZE`; trusted shell only, read-only.
+    pub const SYSTEM_SNAPSHOT: u64 = 27;
     /// Root shell only: 0 queries bits (shutdown=1, restart=2); 1 shuts down,
     /// 2 restarts after final flush. Other actions/reserved arguments rejected.
     pub const POWER: u64 = 26;

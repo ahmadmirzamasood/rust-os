@@ -1,0 +1,16 @@
+[package]
+name = "iced_core"
+version = "0.14.0"
+edition = "2024"
+license = "MIT AND Apache-2.0"
+publish = false
+description = "Guest no_std port of the upstream iced core widget/layout subset"
+
+[lib]
+doctest = false
+
+[features]
+default = []
+
+[lints]
+workspace = true

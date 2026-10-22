@@ -14,6 +14,7 @@ bootloader stage, which `bootloader` 0.11.17 compiles from the crate
 | Component | License | Notes |
 | --- | --- | --- |
 | `bootloader_api` 0.11.17 (linked into the kernel) | MIT OR Apache-2.0 | |
+| Local `iced_core` / `iced_widget` port, derived from Iced 0.14.0 (linked into the ring-3 desktop) | MIT; `core/src/layout/flex.rs` is Apache-2.0 | Source baseline: upstream commit `3997291f318a8bc06fa522f5579836fb3feb94df`. Preserve the Iced MIT notice and the xi-editor Authors / Héctor Ramón Apache notice. The reduced guest API and provenance are documented in [docs/iced-port.md](docs/iced-port.md) |
 | `noto-sans-mono-bitmap` 0.2.0 (linked into the kernel via `crates/gfx`) | MIT (crate, © 2022 Philipp Schuster) | Glyphs rasterized from Noto Sans Mono, which is under the SIL Open Font License 1.1. Kernel uses regular + bold, 16 and 32 px, Basic Latin only. Ship the MIT notice and the OFL text with any released image |
 | `bootloader-x86_64-uefi` / `-common` / `-boot-config` 0.11.17 | MIT OR Apache-2.0 | Contains inline assembly (third-party) |
 | `uefi` 0.38, `uefi-raw` 0.15, `uefi-macros` 0.19, `uguid` 2.2 | MIT OR Apache-2.0 | |
@@ -70,3 +71,11 @@ copyright and library notices, MIT/Apache and LLVM exception are included.
 Missing cached sources or license declarations fail packaging. This is a
 conservative distribution inventory, not a dependency vulnerability audit.
 Host-only SHA-256 tooling uses sha2 0.10.9 (MIT OR Apache-2.0), not guest code.
+
+The modified Iced sources are local path dependencies under `vendor/iced/`.
+Their source and license texts must accompany releases in the public source
+snapshot; they are not unmodified registry archives in the dependency cache.
+The notices are [Iced MIT](vendor/iced/LICENSE) and
+[Apache-2.0](vendor/iced/LICENSE-APACHE).
+See [the port provenance and limits](docs/iced-port.md) before extending or
+redistributing this subset.

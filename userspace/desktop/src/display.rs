@@ -7,6 +7,9 @@ use alloc::vec::Vec;
 use gfx::{Canvas, Rect, Rgb, TextStyle};
 
 pub const MAX_WINDOWS: usize = 8;
+/// Fixed, allocation-free workspace policy. The window limit is shared by all
+/// workspaces; switching never reallocates or copies application surfaces.
+pub const WORKSPACE_COUNT: usize = 4;
 pub const MAX_DIMENSION: u32 = 1024;
 pub const MAX_PIXELS: usize = 512 * 1024;
 const TITLE_HEIGHT: u32 = 24;
@@ -124,6 +127,7 @@ fn buffer(count: usize) -> Result<Vec<Rgb>, Error> {
 struct Window {
     id: u32,
     owner: u32,
+    workspace: usize,
     rect: Rect,
     restore: Option<Rect>,
     minimized: bool,
@@ -143,6 +147,14 @@ pub enum Action {
     Restore,
     Maximize,
     Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowInfo {
+    pub rect: Rect,
+    pub minimized: bool,
+    pub focused: bool,
+    pub workspace: usize,
 }
 
 /// Delivery includes an authenticated destination and window-local coordinates.
@@ -169,10 +181,13 @@ pub struct Display {
     windows: Vec<Window>,
     next_id: u32,
     focus: Option<u32>,
+    workspace: usize,
+    workspace_focus: [Option<u32>; WORKSPACE_COUNT],
     capture: Option<u32>,
     dirty: bool,
     width: u32,
     height: u32,
+    task_strip: bool,
 }
 
 impl Display {
@@ -188,10 +203,13 @@ impl Display {
             windows,
             next_id: 1,
             focus: None,
+            workspace: 0,
+            workspace_focus: [None; WORKSPACE_COUNT],
             capture: None,
             dirty: true,
             width,
             height,
+            task_strip: true,
         })
     }
 
@@ -203,15 +221,152 @@ impl Display {
         self.focus
     }
 
+    pub fn current_workspace(&self) -> usize {
+        self.workspace
+    }
+
+    pub fn workspace_of(&self, id: u32) -> Option<usize> {
+        self.windows
+            .iter()
+            .find(|w| w.id == id)
+            .map(|w| w.workspace)
+    }
+
+    /// Counts all live windows, including minimized windows. Invalid workspace
+    /// indices have no windows; mutating workspace operations reject them.
+    pub fn workspace_window_count(&self, workspace: usize) -> usize {
+        self.windows
+            .iter()
+            .filter(|w| w.workspace == workspace)
+            .count()
+    }
+
+    /// Restore the workspace's last live, visible focus, falling back to its
+    /// topmost window. Pointer capture cannot cross a workspace boundary.
+    pub fn switch_workspace(&mut self, workspace: usize) -> Result<(), Error> {
+        if workspace >= WORKSPACE_COUNT {
+            return Err(Error::Invalid);
+        }
+        if self.workspace == workspace {
+            return Ok(());
+        }
+        self.workspace_focus[self.workspace] = self.focus;
+        self.workspace = workspace;
+        self.capture = None;
+        let remembered = self.workspace_focus[workspace];
+        self.focus = self
+            .windows
+            .iter()
+            .find(|w| Some(w.id) == remembered && w.workspace == workspace && !w.minimized)
+            .map(|w| w.id);
+        if self.focus.is_none() {
+            self.refocus();
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Trusted window-manager operation. Geometry, surfaces and minimized state
+    /// remain intact; moving a focused window away selects a local replacement.
+    pub fn move_to_workspace(&mut self, id: u32, workspace: usize) -> Result<(), Error> {
+        if workspace >= WORKSPACE_COUNT {
+            return Err(Error::Invalid);
+        }
+        let w = self
+            .windows
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or(Error::NotFound)?;
+        if w.workspace == workspace {
+            return Ok(());
+        }
+        w.workspace = workspace;
+        for focus in &mut self.workspace_focus {
+            if *focus == Some(id) {
+                *focus = None;
+            }
+        }
+        if self.capture == Some(id) {
+            self.capture = None;
+        }
+        if self.focus == Some(id) || self.focus.is_none() {
+            self.refocus();
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     pub fn geometry(&self, id: u32) -> Option<Rect> {
         self.windows.iter().find(|w| w.id == id).map(|w| w.rect)
     }
 
+    pub fn window_info(&self, id: u32) -> Option<WindowInfo> {
+        self.windows
+            .iter()
+            .find(|w| w.id == id)
+            .map(|w| WindowInfo {
+                rect: w.rect,
+                minimized: w.minimized,
+                focused: self.focus == Some(id),
+                workspace: w.workspace,
+            })
+    }
+    pub fn set_task_strip(&mut self, visible: bool) {
+        self.task_strip = visible;
+        self.invalidate();
+    }
+    /// Fit a frame into a caller-selected work area, retaining its pre-layout
+    /// geometry. The fixed backing surface stays bounded; extra space uses its
+    /// background colour. Restore returns to the original floating rectangle.
+    pub fn place(&mut self, id: u32, area: Rect) -> Result<(), Error> {
+        if area.x < 0
+            || area.y < 0
+            || area.w < 80
+            || area.h < TITLE_HEIGHT + 32
+            || area.x as u64 + u64::from(area.w) > u64::from(self.width)
+            || area.y as u64 + u64::from(area.h) > u64::from(self.height)
+        {
+            return Err(Error::Invalid);
+        }
+        let w = self
+            .windows
+            .iter_mut()
+            .find(|w| w.id == id)
+            .ok_or(Error::NotFound)?;
+        if w.restore.is_none() {
+            w.restore = Some(w.rect);
+        }
+        w.rect = area;
+        w.minimized = false;
+        self.raise(id)
+    }
+    pub fn toggle_maximize(&mut self, id: u32, area: Rect) -> Result<(), Error> {
+        let w = self
+            .windows
+            .iter()
+            .find(|w| w.id == id)
+            .ok_or(Error::NotFound)?;
+        if w.restore.is_some() {
+            self.action(id, Action::Restore)
+        } else {
+            self.place(id, area)
+        }
+    }
+
     pub fn task_at(&self, x: i32, y: i32) -> Option<u32> {
-        if x < 0 || y < self.height as i32 - 24 || y >= self.height as i32 {
+        if !self.task_strip
+            || x < 0
+            || x >= self.width as i32
+            || y < self.height as i32 - 24
+            || y >= self.height as i32
+        {
             return None;
         }
-        self.windows.get(x as usize / 128).map(|w| w.id)
+        self.windows
+            .iter()
+            .filter(|w| w.workspace == self.workspace)
+            .nth(x as usize / 128)
+            .map(|w| w.id)
     }
 
     pub fn raise(&mut self, id: u32) -> Result<(), Error> {
@@ -220,10 +375,12 @@ impl Display {
             .iter()
             .position(|w| w.id == id)
             .ok_or(Error::NotFound)?;
+        self.switch_workspace(self.windows[index].workspace)?;
         let mut window = self.windows.remove(index);
         window.minimized = false;
         self.windows.push(window);
         self.focus = Some(id);
+        self.workspace_focus[self.workspace] = Some(id);
         self.dirty = true;
         Ok(())
     }
@@ -305,6 +462,22 @@ impl Display {
         }
     }
 
+    /// Draw a trusted built-in view into its owned staging surface, then publish.
+    /// This is an in-process rendering adapter; external clients still use the
+    /// validated copy protocol. The callback cannot access other window buffers.
+    pub(crate) fn paint_surface(
+        &mut self,
+        client: u32,
+        id: u32,
+        paint: impl FnOnce(&mut [Rgb], u32, u32),
+    ) -> Result<(), Error> {
+        let w = self.owned(client, id)?;
+        paint(&mut w.back, w.width, w.height);
+        w.front.copy_from_slice(&w.back);
+        self.dirty = true;
+        Ok(())
+    }
+
     fn create(&mut self, client: u32, width: u32, height: u32, title: &str) -> Result<u32, Error> {
         if self.windows.len() == MAX_WINDOWS {
             return Err(Error::Exhausted);
@@ -320,6 +493,7 @@ impl Display {
         self.windows.push(Window {
             id,
             owner: client,
+            workspace: self.workspace,
             rect: Rect::new(offset, offset, width, height + TITLE_HEIGHT),
             restore: None,
             minimized: false,
@@ -332,6 +506,7 @@ impl Display {
         });
         self.next_id = next;
         self.focus = Some(id);
+        self.workspace_focus[self.workspace] = Some(id);
         self.dirty = true;
         Ok(id)
     }
@@ -362,8 +537,9 @@ impl Display {
             .windows
             .iter()
             .rev()
-            .find(|w| !w.minimized)
+            .find(|w| !w.minimized && w.workspace == self.workspace)
             .map(|w| w.id);
+        self.workspace_focus[self.workspace] = self.focus;
     }
 
     /// Called by the transport on peer closure, including a faulted process.
@@ -387,9 +563,13 @@ impl Display {
             .ok_or(Error::NotFound)?;
         match action {
             Action::Move(x, y) => {
+                // Dragging out of a managed layout restores the floating size
+                // before applying the requested pointer-relative position.
+                if let Some(rect) = w.restore.take() {
+                    w.rect = rect;
+                }
                 w.rect.x = x.clamp(0, self.width as i32 - 32);
                 w.rect.y = y.clamp(0, self.height as i32 - TITLE_HEIGHT as i32);
-                w.restore = None;
             }
             Action::Resize(width, height) => {
                 pixel_count(width, height)?;
@@ -427,7 +607,10 @@ impl Display {
     }
 
     pub fn key(&self, code: u32, pressed: bool) -> Option<Delivery> {
-        let w = self.windows.iter().find(|w| Some(w.id) == self.focus)?;
+        let w = self
+            .windows
+            .iter()
+            .find(|w| Some(w.id) == self.focus && !w.minimized && w.workspace == self.workspace)?;
         Some(Delivery {
             client: w.owner,
             window: w.id,
@@ -437,12 +620,14 @@ impl Display {
 
     pub fn motion(&self, x: i32, y: i32) -> Option<Delivery> {
         let w = if let Some(id) = self.capture {
-            self.windows.iter().find(|w| w.id == id)?
+            self.windows
+                .iter()
+                .find(|w| w.id == id && !w.minimized && w.workspace == self.workspace)?
         } else {
             self.windows
                 .iter()
                 .rev()
-                .find(|w| !w.minimized && w.rect.contains(x, y))?
+                .find(|w| !w.minimized && w.workspace == self.workspace && w.rect.contains(x, y))?
         };
         Some(Delivery {
             client: w.owner,
@@ -459,15 +644,18 @@ impl Display {
     /// directed to the pressed window even when the pointer leaves its bounds.
     pub fn pointer(&mut self, x: i32, y: i32, pressed: bool) -> Option<Delivery> {
         let index = if let Some(id) = self.capture {
-            self.windows.iter().position(|w| w.id == id)?
-        } else {
             self.windows
                 .iter()
-                .rposition(|w| !w.minimized && w.rect.contains(x, y))?
+                .position(|w| w.id == id && !w.minimized && w.workspace == self.workspace)?
+        } else {
+            self.windows.iter().rposition(|w| {
+                !w.minimized && w.workspace == self.workspace && w.rect.contains(x, y)
+            })?
         };
         if pressed && self.capture.is_none() {
             let w = self.windows.remove(index);
             self.focus = Some(w.id);
+            self.workspace_focus[self.workspace] = Some(w.id);
             self.capture = Some(w.id);
             self.windows.push(w);
             self.dirty = true;
@@ -516,7 +704,7 @@ impl Display {
         }
         background(canvas);
         for w in &self.windows {
-            if w.minimized {
+            if w.minimized || w.workspace != self.workspace {
                 continue;
             }
             let title_bg = if Some(w.id) == self.focus {
@@ -524,7 +712,17 @@ impl Display {
             } else {
                 Rgb::new(55, 60, 70)
             };
-            canvas.fill_rect(w.rect, Rgb::new(25, 28, 35));
+            // Offset shadows and an active edge separate overlapping windows
+            // without extra surfaces, alpha buffers or allocations.
+            canvas.fill_rounded_rect(
+                Rect::new(w.rect.x + 4, w.rect.y + 6, w.rect.w, w.rect.h),
+                6,
+                Rgb::new(16, 20, 28),
+            );
+            canvas.fill_rect(
+                w.rect,
+                w.front.first().copied().unwrap_or(Rgb::new(25, 28, 35)),
+            );
             canvas.fill_rect(
                 Rect::new(w.rect.x, w.rect.y, w.rect.w, TITLE_HEIGHT),
                 title_bg,
@@ -546,6 +744,11 @@ impl Display {
             if w.rect.w >= 80 {
                 let edge = w.rect.x + w.rect.w as i32;
                 let ink = Rgb::new(245, 245, 245);
+                canvas.fill_rounded_rect(
+                    Rect::new(edge - 23, w.rect.y + 3, 20, 18),
+                    4,
+                    Rgb::new(151, 66, 78),
+                );
                 canvas.fill_rect(Rect::new(edge - 65, w.rect.y + 15, 10, 2), ink);
                 canvas.fill_rect(Rect::new(edge - 41, w.rect.y + 7, 10, 10), ink);
                 canvas.fill_rect(Rect::new(edge - 39, w.rect.y + 9, 6, 6), title_bg);
@@ -554,6 +757,14 @@ impl Display {
                     canvas.set_pixel(edge - 8 - n, w.rect.y + 7 + n, ink);
                 }
             }
+            canvas.fill_rect(
+                Rect::new(w.rect.x, w.rect.y + TITLE_HEIGHT as i32 - 1, w.rect.w, 1),
+                if Some(w.id) == self.focus {
+                    Rgb::new(108, 181, 220)
+                } else {
+                    Rgb::new(78, 87, 103)
+                },
+            );
             let height = w.height.min(w.rect.h.saturating_sub(TITLE_HEIGHT));
             for y in 0..height.min(
                 self.height
@@ -567,13 +778,48 @@ impl Display {
                     &w.front[offset..offset + count],
                 );
             }
+            for inset in [5, 9, 13] {
+                for delta in 0..inset - 2 {
+                    canvas.set_pixel(
+                        w.rect.x + w.rect.w as i32 - inset + delta,
+                        w.rect.y + w.rect.h as i32 - 3 - delta,
+                        Rgb::new(115, 133, 155),
+                    );
+                }
+            }
         }
         // A small task strip makes minimized windows discoverable/restorable.
-        for (index, w) in self.windows.iter().enumerate() {
+        if self.task_strip && self.workspace_window_count(self.workspace) > 0 {
+            canvas.fill_rect(
+                Rect::new(0, self.height as i32 - 24, self.width, 24),
+                Rgb::new(24, 29, 38),
+            );
+        }
+        for (index, w) in self
+            .windows
+            .iter()
+            .filter(|w| self.task_strip && w.workspace == self.workspace)
+            .enumerate()
+        {
             let x = index as i32 * 128;
             let y = self.height as i32 - 24;
-            let bg = Rgb::new(45, 55, 70);
-            canvas.fill_rect(Rect::new(x, y, 124, 24), bg);
+            let active = Some(w.id) == self.focus;
+            let bg = if active {
+                Rgb::new(52, 75, 103)
+            } else {
+                Rgb::new(45, 55, 70)
+            };
+            canvas.fill_rounded_rect(Rect::new(x + 2, y + 1, 122, 23), 4, bg);
+            canvas.fill_rect(
+                Rect::new(x + 12, y + 22, 100, 2),
+                if active {
+                    Rgb::new(108, 181, 220)
+                } else if w.minimized {
+                    Rgb::new(92, 99, 115)
+                } else {
+                    Rgb::new(70, 112, 145)
+                },
+            );
             let count = w.title_len.min(12);
             canvas.draw_text(
                 x + 4,
@@ -591,10 +837,185 @@ impl Display {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_painter_checks_ownership_and_publishes_only_its_surface() {
+        let mut display = super::Display::new(640, 480).unwrap();
+        let first = display.create(7, 4, 3, "First").unwrap();
+        let second = display.create(8, 4, 3, "Second").unwrap();
+        display.dirty = false;
+        let mut entered = false;
+        assert_eq!(
+            display.paint_surface(8, first, |_, _, _| entered = true),
+            Err(super::Error::Ownership)
+        );
+        assert_eq!(
+            display.paint_surface(7, u32::MAX, |_, _, _| entered = true),
+            Err(super::Error::NotFound)
+        );
+        assert!(!entered && !display.dirty);
+        display
+            .paint_surface(7, first, |pixels, width, height| {
+                assert_eq!((pixels.len(), width, height), (12, 4, 3));
+                pixels.fill(gfx::Rgb::new(1, 2, 3));
+            })
+            .unwrap();
+        assert!(display.dirty);
+        let w = display.windows.iter().find(|w| w.id == first).unwrap();
+        assert_eq!(w.front, w.back);
+        assert!(w.front.iter().all(|p| *p == gfx::Rgb::new(1, 2, 3)));
+        assert!(
+            display
+                .windows
+                .iter()
+                .find(|w| w.id == second)
+                .unwrap()
+                .front
+                .iter()
+                .all(|p| *p == gfx::Rgb::new(0, 0, 0))
+        );
+    }
     extern crate std;
     use super::*;
     use gfx::{Layout, PixelFormat};
     use std::vec;
+    #[test]
+    fn workspace_switch_isolates_pixels_input_and_capture_without_copying_surfaces() {
+        let mut d = Display::new(240, 180).unwrap();
+        let a = create(&mut d, 7);
+        d.request(7, &fill(a, Rect::new(0, 0, 80, 60), Rgb::new(255, 0, 0)))
+            .unwrap();
+        present(&mut d, 7, a);
+        assert_eq!(d.pointer(20, 50, true).unwrap().window, a);
+        d.switch_workspace(1).unwrap();
+        assert_eq!(d.capture, None);
+        assert_eq!(d.focus(), None);
+        assert_eq!(d.key(65, true), None);
+        assert_eq!(d.motion(20, 50), None);
+        assert_eq!(d.pointer(20, 50, false), None);
+        let b = create(&mut d, 8);
+        d.action(b, Action::Move(16, 16)).unwrap();
+        d.request(8, &fill(b, Rect::new(0, 0, 80, 60), Rgb::new(0, 255, 0)))
+            .unwrap();
+        present(&mut d, 8, b);
+        let surfaces = d
+            .windows
+            .iter()
+            .map(|w| (w.id, w.front.as_ptr(), w.back.as_ptr()))
+            .collect::<Vec<_>>();
+        let layout = Layout::new(240, 180, 240, 3, PixelFormat::Rgb).unwrap();
+        let mut pixels = vec![0; 240 * 180 * 3];
+        for (workspace, expected, color) in [
+            (0, Some(a), [255, 0, 0]),
+            (1, Some(b), [0, 255, 0]),
+            (3, None, [29, 38, 59]),
+        ] {
+            d.switch_workspace(workspace).unwrap();
+            assert_eq!(d.focus(), expected);
+            assert_eq!(d.key(65, true).map(|e| e.window), expected);
+            assert_eq!(d.motion(20, 50).map(|e| e.window), expected);
+            assert_eq!(d.task_at(10, 170), expected);
+            assert_eq!(d.task_at(140, 170), None);
+            d.render(&mut Canvas::new(&mut pixels, layout).unwrap())
+                .unwrap();
+            assert_eq!(
+                &pixels[(50 * 240 + 20) * 3..(50 * 240 + 20) * 3 + 3],
+                &color
+            );
+        }
+        assert_eq!(
+            surfaces,
+            d.windows
+                .iter()
+                .map(|w| (w.id, w.front.as_ptr(), w.back.as_ptr()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(d.workspace_window_count(0), 1);
+        assert_eq!(d.workspace_window_count(1), 1);
+        assert_eq!(d.workspace_window_count(WORKSPACE_COUNT), 0);
+    }
+
+    #[test]
+    fn workspace_move_preserves_geometry_and_minimization_and_raise_follows_window() {
+        let mut d = Display::new(240, 180).unwrap();
+        let a = create(&mut d, 7);
+        let b = create(&mut d, 8);
+        d.place(b, Rect::new(0, 0, 240, 150)).unwrap();
+        let managed = d.geometry(b).unwrap();
+        d.pointer(50, 50, true).unwrap();
+        d.move_to_workspace(b, 2).unwrap();
+        assert_eq!(d.capture, None);
+        assert_eq!(d.focus(), Some(a));
+        assert_eq!(d.workspace_of(b), Some(2));
+        assert_eq!(d.geometry(b), Some(managed));
+        d.action(b, Action::Minimize).unwrap();
+        d.switch_workspace(2).unwrap();
+        assert_eq!(d.focus(), None);
+        assert!(d.window_info(b).unwrap().minimized);
+        assert_eq!(d.task_at(10, 170), Some(b));
+        d.switch_workspace(0).unwrap();
+        d.raise(b).unwrap();
+        assert_eq!(d.current_workspace(), 2);
+        assert_eq!(d.focus(), Some(b));
+        assert!(!d.window_info(b).unwrap().minimized);
+        assert_eq!(d.geometry(b), Some(managed));
+        assert_eq!(d.window_info(b).unwrap().workspace, 2);
+        d.action(b, Action::Move(40, 50)).unwrap();
+        assert_eq!(d.geometry(b), Some(Rect::new(40, 50, 80, 84)));
+    }
+
+    #[test]
+    fn workspace_focus_remembers_live_windows_and_rejects_invalid_mutations() {
+        let mut d = Display::new(240, 180).unwrap();
+        let a = create(&mut d, 7);
+        d.switch_workspace(1).unwrap();
+        let b = create(&mut d, 8);
+        let c = create(&mut d, 9);
+        d.raise(b).unwrap();
+        d.switch_workspace(0).unwrap();
+        d.switch_workspace(1).unwrap();
+        assert_eq!(d.focus(), Some(b));
+        d.switch_workspace(0).unwrap();
+        d.action(b, Action::Close).unwrap();
+        d.switch_workspace(1).unwrap();
+        assert_eq!(d.focus(), Some(c));
+        d.switch_workspace(0).unwrap();
+        d.disconnect(9);
+        d.switch_workspace(1).unwrap();
+        assert_eq!(d.focus(), None);
+        d.raise(a).unwrap();
+        d.pointer(20, 50, true).unwrap();
+        let original = d.geometry(a);
+        assert_eq!(d.switch_workspace(WORKSPACE_COUNT), Err(Error::Invalid));
+        assert_eq!(d.move_to_workspace(a, usize::MAX), Err(Error::Invalid));
+        assert_eq!(d.move_to_workspace(b, 1), Err(Error::NotFound));
+        assert_eq!(d.raise(b), Err(Error::NotFound));
+        assert_eq!(d.workspace_of(b), None);
+        assert_eq!(d.geometry(a), original);
+        assert_eq!(d.current_workspace(), 0);
+        assert_eq!(d.focus(), Some(a));
+        assert_eq!(d.capture, Some(a));
+    }
+    #[test]
+    fn work_area_maximize_tile_restore_and_rejected_bounds() {
+        let mut d = Display::new(1280, 800).unwrap();
+        let id = create(&mut d, 7);
+        let original = d.geometry(id).unwrap();
+        let area = Rect::new(8, 44, 1264, 660);
+        d.toggle_maximize(id, area).unwrap();
+        assert_eq!(d.geometry(id), Some(area));
+        d.toggle_maximize(id, area).unwrap();
+        assert_eq!(d.geometry(id), Some(original));
+        d.place(id, Rect::new(8, 44, 628, 660)).unwrap();
+        d.place(id, Rect::new(644, 44, 628, 660)).unwrap();
+        d.action(id, Action::Restore).unwrap();
+        assert_eq!(d.geometry(id), Some(original));
+        assert_eq!(d.place(id, Rect::new(-1, 0, 100, 100)), Err(Error::Invalid));
+        assert_eq!(
+            d.place(id, Rect::new(0, 0, u32::MAX, 100)),
+            Err(Error::Invalid)
+        );
+        assert_eq!(d.geometry(id), Some(original));
+    }
 
     fn create(d: &mut Display, client: u32) -> u32 {
         let mut packet = vec![1, 1, 0, 0, 0, 0, 0, 0];

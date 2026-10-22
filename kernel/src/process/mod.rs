@@ -41,6 +41,7 @@
 pub mod display;
 pub mod files;
 pub mod loader;
+pub mod monitor;
 pub mod power;
 
 use alloc::boxed::Box;

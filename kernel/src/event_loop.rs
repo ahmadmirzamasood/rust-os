@@ -43,15 +43,20 @@ pub fn run(mut pipeline: Pipeline, mut ui: Option<Ui>) -> ! {
         while let Some(event) = pipeline.next_event() {
             log_event(&event);
             crate::display_device::push(&event);
+            // A user-space desktop owns these events. Diagnostic actions must
+            // not also consume them (in particular F9's eight-second stall).
+            let desktop_active = crate::display_device::active();
             if let InputEvent::Key(key) = event
                 && key.key == Key::F9
                 && key.pressed
                 && !key.repeat
+                && !desktop_active
             {
                 stall(&pipeline);
                 draining_after_stall = true;
             }
-            if let Some(ui) = ui.as_mut()
+            if !desktop_active
+                && let Some(ui) = ui.as_mut()
                 && let Some(clicks) = ui.handle(&event)
             {
                 let (x, y) = pipeline.pointer().position();
@@ -77,6 +82,8 @@ pub fn run(mut pipeline: Pipeline, mut ui: Option<Ui>) -> ! {
             }
             let active = crate::display_device::active();
             if crate::display_device::take_restore() {
+                let (x, y) = pipeline.pointer().position();
+                let _ = ui.handle(&InputEvent::PointerMoved { x, y });
                 ui.invalidate_screen();
             }
             if !active {

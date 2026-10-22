@@ -163,6 +163,7 @@ fn public_path(path: &str) -> bool {
             "tools/",
             "docs/",
             "licenses/",
+            "vendor/iced/",
             ".github/",
             ".cargo/",
         ]
@@ -294,8 +295,22 @@ mod tests {
         ] {
             assert!(!public_path(p));
         }
-        for p in ["docs/release.md", "kernel/src/main.rs", "Cargo.lock"] {
+        for p in [
+            "docs/release.md",
+            "kernel/src/main.rs",
+            "Cargo.lock",
+            "vendor/iced/core/src/lib.rs",
+            "vendor/iced/LICENSE",
+            "vendor/iced/LICENSE-APACHE",
+        ] {
             assert!(public_path(p));
+        }
+        for p in [
+            "vendor/other/lib.rs",
+            "vendor/iced/../private/notes.md",
+            "vendor/iced/.agent-private/STATE.md",
+        ] {
+            assert!(!public_path(p));
         }
     }
     #[test]

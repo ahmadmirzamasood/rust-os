@@ -134,6 +134,8 @@ name = "desktop"
 version = "0.0.0"
 dependencies = [
  "gfx",
+ "iced_core",
+ "iced_widget",
  "os-abi",
  "storage",
 ]
@@ -241,6 +243,17 @@ dependencies = [
  "crc",
  "log",
  "uuid",
+]
+
+[[package]]
+name = "iced_core"
+version = "0.14.0"
+
+[[package]]
+name = "iced_widget"
+version = "0.14.0"
+dependencies = [
+ "iced_core",
 ]
 
 [[package]]

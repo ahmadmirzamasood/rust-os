@@ -113,7 +113,7 @@ also retains all previous boot, fault, input and process scenarios.
 The demos are bundled examples; dynamic client registration, reliable delivery,
 Unicode/layout/shaping, alpha blending, arbitrary pixel uploads, a Files GUI,
 multiple displays, USB input and GPU acceleration remain outside this slice.
-The 8 MiB arena can reject a mode or surface combination below the individual
+The 12 MiB arena can reject a mode or surface combination below the individual
 geometry ceilings. The demonstrated mode is QEMU GOP 1280x800, RGB/BGR conversion;
 no VirtualBox/VMware or physical-device compatibility is implied.
 

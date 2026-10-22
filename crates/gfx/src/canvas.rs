@@ -208,13 +208,21 @@ impl<'a> Canvas<'a> {
         // (stride * (height - 1) + width) * bpp fits in usize and the buffer
         // is at least that long, so these offsets cannot overflow or go out
         // of bounds. Slicing would panic rather than corrupt memory anyway.
-        for y in y0 as usize..y1 as usize {
-            let row = y * stride;
-            let start = (row + x0 as usize) * bpp;
-            let end = (row + x1 as usize) * bpp;
-            for chunk in self.buf[start..end].chunks_exact_mut(bpp) {
-                chunk.copy_from_slice(px);
-            }
+        let start = (y0 as usize * stride + x0 as usize) * bpp;
+        let len = (x1 - x0) as usize * bpp;
+        self.buf[start..start + bpp].copy_from_slice(px);
+        // Grow an encoded solid span by doubling, then reuse it for later
+        // rows. This avoids a per-pixel copy loop for backgrounds and panels,
+        // especially expensive in diagnostic/debug builds. Padding is skipped.
+        let mut filled = bpp;
+        while filled < len {
+            let count = filled.min(len - filled);
+            self.buf.copy_within(start..start + count, start + filled);
+            filled += count;
+        }
+        for y in y0 as usize + 1..y1 as usize {
+            let target = (y * stride + x0 as usize) * bpp;
+            self.buf.copy_within(start..start + len, target);
         }
     }
 }

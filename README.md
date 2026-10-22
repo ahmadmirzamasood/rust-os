@@ -1,8 +1,11 @@
 # rust-os (working name)
 
 An experimental, open-source operating system written in Rust, with its own
-graphical desktop: Computer, Files and Trash icons, a taskbar, basic window
-management, file browsing, and shutdown/restart. The look aims for the
+graphical desktop: Computer, Files and Trash, a pinned application dock,
+a window manager, task monitoring, file browsing, and shutdown/restart.
+The Rust shell includes searchable Applications and four virtual workspaces
+with remembered focus, a global dock and keyboard/mouse navigation.
+See the [desktop environment](docs/desktop-environment.md) for controls and limits. The look aims for the
 clarity of GNOME and Pantheon without using their code or branding.
 
 **Status: experimental graphical desktop, isolated processes and storage.** There is no general-purpose OS
@@ -120,6 +123,10 @@ controls, limits, validation commands and the kernel/device boundary.
 
 See [desktop controls and limits](docs/desktop.md) for the shell, built-in
 applications, saved preferences and reboot test.
+
+Settings uses a local `no_std` port of Iced 0.14's layout and widget subset,
+rendered inside the guest. See [the Iced port](docs/iced-port.md) for its API,
+upstream provenance and limits.
 
 Release preparation: [candidate, commands and publication checklist](docs/release.md).
 Security boundaries: [threat model](docs/security-model.md).

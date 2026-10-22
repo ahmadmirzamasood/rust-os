@@ -40,3 +40,10 @@ service restart. See [review scope and threat model](docs/security-model.md) and
 The graphical shell uses the same bounded display boot role as the display demo.
 Built-in views share a process and the global filesystem namespace. Shell
 preferences are not confidential or protected from other bundled programs.
+
+The shell-only SYSTEM_SNAPSHOT call exposes bounded process names/PIDs,
+cumulative scheduler CPU time, handle counts, thread count and free frame
+bytes. It validates the complete output span and never exposes kernel
+addresses, process contents or process-termination rights. Desktop Task
+Manager closes built-in views in the shared shell; it cannot force-kill
+arbitrary processes. See [desktop environment](docs/desktop-environment.md).
